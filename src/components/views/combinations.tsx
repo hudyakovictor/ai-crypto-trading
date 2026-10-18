@@ -18,7 +18,15 @@ function DirIcon({ d }: { d: string }) {
   return <Minus className="size-3.5" style={{ color: "var(--blue)" }} strokeWidth={2.2} />;
 }
 
-export function CombinationsView({ combos }: { combos: ApiState<CombinationsResponse> }) {
+export function CombinationsView({
+  combos,
+  asset,
+  onSelectAsset,
+}: {
+  combos: ApiState<CombinationsResponse>;
+  asset: string;
+  onSelectAsset: (symbol: string) => void;
+}) {
   const [filter, setFilter] = useState<StatusFilter>("all");
 
   const rows = useMemo(() => {
@@ -29,6 +37,13 @@ export function CombinationsView({ combos }: { combos: ApiState<CombinationsResp
   }, [combos.data, filter]);
 
   const s = combos.data?.stats;
+  // Переключатель активных из вселенной: без него экран молча оставался бы на BTC,
+  // хотя цикл строит связки по всем отобранным парам.
+  const universe = combos.data?.universe ?? [];
+  const chips = universe.length
+    ? universe.map((u) => ({ symbol: u.symbol, score: u.score, role: u.role, dataLive: u.dataLive }))
+    : [{ symbol: asset, score: null as number | null, role: "core" as const, dataLive: combos.data?.dataLive !== false }];
+  const staleCount = chips.filter((c) => !c.dataLive).length;
 
   return (
     <div className="mx-auto grid max-w-[1920px] gap-4 p-5 anim-fade-up">
@@ -42,17 +57,53 @@ export function CombinationsView({ combos }: { combos: ApiState<CombinationsResp
         note="ИИ разберёт топ цикла, отбракует дубли категорий и предложит порог отбора — применяется одним кликом."
         accent="Комбинации · цех идей"
         steps={[
-          { t: "Это генератор гипотез", d: "каждый цикл движок строит ровно 100 связок из 15 категорий сигналов" },
+          { t: "Это генератор гипотез", d: "каждый цикл строит по 100 связок из 15 категорий — на каждый актив вселенной, а не только на BTC" },
           { t: "Смотрите колонку EVS", d: "оценка 0–100: ≥ 75 — элита цикла; серая строка — не прошла ваши фильтры (клавиша S)" },
           { t: "Вкладки сверху режут шум", d: "«Promising» — то, что реально может стать торговой методикой" },
         ]}
       />
 
+      {/* Актив: связки считаются по каждому участнику вселенной */}
+      <div className="anim-fade-up flex items-center gap-2 overflow-x-auto rounded-[10px] border border-border bg-surface px-3 py-2">
+        <span className="shrink-0 text-[13px] font-semibold uppercase tracking-[0.14em] text-text-3">
+          Актив
+        </span>
+        <div className="flex items-center gap-1">
+          {chips.map((c) => {
+            const active = c.symbol === asset;
+            return (
+              <button
+                key={c.symbol}
+                type="button"
+                onClick={() => onSelectAsset(c.symbol)}
+                className={`hoverable pressable inline-flex shrink-0 items-center gap-1.5 rounded-[5px] border px-1.5 py-[3px] text-[13px] font-medium transition-colors ${
+                  active
+                    ? "border-[rgba(91,141,238,0.55)] bg-accent-dim text-accent"
+                    : "border-border-strong bg-surface2 text-text-1 hover:text-accent"
+                }`}
+                style={c.role === "explore" && !active ? { borderStyle: "dashed" } : undefined}
+              >
+                <span className="num">{c.symbol.replace("-USDT", "")}</span>
+                {typeof c.score === "number" && <span className="num text-text-3">{c.score}</span>}
+                {!c.dataLive && (
+                  <span className="size-[5px] rounded-full" style={{ background: "var(--amber)" }} />
+                )}
+              </button>
+            );
+          })}
+        </div>
+        <span className="num ml-auto shrink-0 text-[13px] text-text-3">
+          {combos.loading ? "пересчёт…" : `${chips.length} в выборке${staleCount ? ` · ${staleCount} без живых данных` : ""}`}
+        </span>
+      </div>
+
       <Panel
         title="Комбинаторная разведка"
         sub={
           combos.data
-            ? `${combos.data.symbol} · режим ${combos.data.regime.replace(/_/g, " ")} · 100 вариаций за цикл`
+            ? `${combos.data.symbol} · режим ${combos.data.regime.replace(/_/g, " ")} · 100 вариаций за цикл${
+                combos.data.dataLive === false ? " · синтетические свечи" : ""
+              }`
             : "100 вариаций за цикл"
         }
         actions={
@@ -71,7 +122,7 @@ export function CombinationsView({ combos }: { combos: ApiState<CombinationsResp
         <div className="flex h-10 items-center gap-1 border-b border-border px-3">
           {(
             [
-              ["all", "Все 100"],
+              ["all", "Весь пул"],
               ["promising", "Promising"],
               ["candidate", "Candidate"],
               ["rejected", "Rejected / слабые"],
@@ -182,9 +233,12 @@ export function CombinationsView({ combos }: { combos: ApiState<CombinationsResp
         <p className="text-[14px] leading-relaxed text-text-3">
           Каждый цикл детерминированно строит <span className="num text-text-2">30 парных</span>,{" "}
           <span className="num text-text-2">40 тройных</span>, <span className="num text-text-2">20 квадро-комбо</span> и{" "}
-          <span className="num text-text-2">10 режимных VETO</span> из 15 категорий. EVS — взвешенная сумма 7 факторов:
+          <span className="num text-text-2">10 режимных VETO</span> из 15 категорий — на каждый актив
+          вселенной, поэтому пул цикла это N×100 связок, а ранжируются они вместе по EVS.
+          EVS — взвешенная сумма 7 факторов:
           новизна, кросс-согласие, историческая поддержка, стабильность эффекта, ликвидность, качество данных и тестируемость.
-          Комбинации с EVS ≥ 60 автоматически оформляются в фальсифицируемые гипотезы.
+          Связки выше порога фильтров (клавиша S) оформляются в фальсифицируемые гипотезы — с квотой на
+          актив, чтобы один лидер не выключал остальные пары из теста.
         </p>
       </div>
     </div>

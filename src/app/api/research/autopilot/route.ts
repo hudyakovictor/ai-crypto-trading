@@ -27,7 +27,7 @@ export async function POST(req: Request) {
     success: true,
     autopilot: { enabled: s.enabled, cyclesCompleted: s.cyclesCompleted, retrainsCompleted: s.retrainsCompleted },
     message: s.enabled
-      ? "Автопилот включён: циклы 100 комбинаций и переобучение будут идти сами каждые ~14 минут"
+      ? "Автопилот включён: циклы и переобучение идут сами каждые ~14 минут, сколько гипотез оформлять решает планировщик"
       : "Автопилот выключен: циклы запускаются только вручную (клавиша R)",
   });
 }

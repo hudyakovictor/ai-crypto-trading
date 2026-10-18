@@ -1,18 +1,20 @@
 import { OKXTicker, OKXCandle, OKXFundingRate, OKXOpenInterest, OKXOrderBook } from "../types";
 
-export const TRACKED_SYMBOLS = [
+/**
+ * Список только для полностью синтетического режима (OKX недоступен).
+ * Реальная вселенная больше не хардкодится — её строит quant/universe.ts
+ * из полного ответа /market/tickers. Устаревшие тикеры (MATIC → POL) сами
+ * отваливаются: их нет в ответе биржи, и мы их больше не выдумываем.
+ */
+export const FALLBACK_SYMBOLS = [
   "BTC-USDT",
   "ETH-USDT",
   "SOL-USDT",
   "XRP-USDT",
   "DOGE-USDT",
   "AVAX-USDT",
-  "ARB-USDT",
-  "OP-USDT",
-  "SUI-USDT",
-  "LINK-USDT",
-  "MATIC-USDT",
   "BNB-USDT",
+  "LINK-USDT",
 ];
 
 const OKX_BASE_URL = "https://www.okx.com";
@@ -43,6 +45,13 @@ export class OKXClient {
     }
   }
 
+  /**
+   * Все реальные USDT-пары спот-линейки OKX (сортировка по объёму в котировке).
+   * Важнее всего то, чего здесь больше нет: раньше отсутствующий инструмент
+   * молча подменялся синтетикой при глобальном isLive: true — движок строил
+   * гипотезы на выдуманных ценах, считая их живыми. Теперь синтетика возможна
+   * только если весь запрос к OKX упал, и тогда isLive: true не бывает.
+   */
   async getTickers(): Promise<{ tickers: OKXTicker[]; latencyMs: number; isLive: boolean }> {
     const startTime = Date.now();
     try {
@@ -59,36 +68,38 @@ export class OKXClient {
         throw new Error(`OKX API error: ${json.msg || "Unknown error"}`);
       }
 
-      const map = new Map<string, OKXTicker>();
+      const parsed: OKXTicker[] = [];
       for (const item of json.data) {
-        if (TRACKED_SYMBOLS.includes(item.instId)) {
-          map.set(item.instId, {
-            instId: item.instId,
-            last: parseFloat(item.last) || 0,
-            open24h: parseFloat(item.open24h) || 0,
-            high24h: parseFloat(item.high24h) || 0,
-            low24h: parseFloat(item.low24h) || 0,
-            vol24h: parseFloat(item.vol24h) || 0,
-            volCcy24h: parseFloat(item.volCcy24h) || 0,
-            bidPx: parseFloat(item.bidPx) || 0,
-            bidSz: parseFloat(item.bidSz) || 0,
-            askPx: parseFloat(item.askPx) || 0,
-            askSz: parseFloat(item.askSz) || 0,
-            ts: parseInt(item.ts, 10) || Date.now(),
-          });
-        }
+        const instId: string = item.instId ?? "";
+        if (!instId.endsWith("-USDT")) continue;
+        const last = parseFloat(item.last) || 0;
+        if (last <= 0) continue;
+        parsed.push({
+          instId,
+          last,
+          open24h: parseFloat(item.open24h) || 0,
+          high24h: parseFloat(item.high24h) || 0,
+          low24h: parseFloat(item.low24h) || 0,
+          vol24h: parseFloat(item.vol24h) || 0,
+          volCcy24h: parseFloat(item.volCcy24h) || 0,
+          bidPx: parseFloat(item.bidPx) || 0,
+          bidSz: parseFloat(item.bidSz) || 0,
+          askPx: parseFloat(item.askPx) || 0,
+          askSz: parseFloat(item.askSz) || 0,
+          ts: parseInt(item.ts, 10) || Date.now(),
+        });
       }
 
-      const filtered = TRACKED_SYMBOLS.map((sym) => {
-        if (map.has(sym)) return map.get(sym)!;
-        return this.generateSyntheticTicker(sym);
-      });
+      if (parsed.length === 0) throw new Error("OKX returned no tradeable USDT pairs");
 
-      return { tickers: filtered, latencyMs, isLive: true };
+      parsed.sort(
+        (a, b) => (b.volCcy24h || b.vol24h * b.last) - (a.volCcy24h || a.vol24h * a.last)
+      );
+      return { tickers: parsed, latencyMs, isLive: true };
     } catch (err) {
       const latencyMs = Date.now() - startTime;
       console.warn("OKX tickers fetch failed, falling back to realistic synthetic data:", err);
-      const synthetic = TRACKED_SYMBOLS.map((sym) => this.generateSyntheticTicker(sym));
+      const synthetic = FALLBACK_SYMBOLS.map((sym) => this.generateSyntheticTicker(sym));
       return { tickers: synthetic, latencyMs, isLive: false };
     }
   }

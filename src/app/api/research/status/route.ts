@@ -10,13 +10,19 @@ import {
 } from "@/db/schema";
 import { desc, eq } from "drizzle-orm";
 import { autonomousScheduler } from "@/lib/quant/autonomous-scheduler";
+import { loadActiveUniverse, type ActiveUniverse } from "@/lib/quant/universe-store";
+import type { UniverseMember } from "@/lib/quant/universe";
 import { getAutopilotState } from "@/lib/quant/autopilot";
-import { okxClient } from "@/lib/okx/okx-client";
 import { CATEGORY_DEFINITIONS, CATEGORY_KEYS } from "@/lib/types";
+import type { PlannerDecisionRow } from "@/lib/ui-types";
 
 export async function GET() {
   try {
-    const assetsList = await db.select().from(assets);
+    const assetsList = await db
+      .select()
+      .from(assets)
+      .orderBy(desc(assets.volume24h))
+      .limit(60);
     const activeHypotheses = await db
       .select()
       .from(hypotheses)
@@ -69,8 +75,23 @@ export async function GET() {
     const latestRunMetrics = (recentExperiments[0]?.metricsJson ?? {}) as {
       latencyMs?: number;
       isLiveOKX?: boolean;
+      listedCount?: number;
+      floorCount?: number;
+      planner?: PlannerDecisionRow;
     };
     const latestQuality = qualityLogs[0] ?? null;
+
+    // Состав вселенной: UI объясняет, какие пары система выбрала сама и почему.
+    // Ошибку скана не роняем — статусный экран важнее пустой строки отбора.
+    let activeUniverse: UniverseMember[] = [];
+    let universeSource: ActiveUniverse["source"] | "none" = "none";
+    try {
+      const loaded = await loadActiveUniverse();
+      activeUniverse = loaded.universe;
+      universeSource = loaded.source;
+    } catch {
+      activeUniverse = [];
+    }
 
     return NextResponse.json({
       success: true,
@@ -78,6 +99,13 @@ export async function GET() {
       latestLatencyMs: latestRunMetrics.latencyMs ?? latestQuality?.latencyMs ?? null,
       latestRegime: recentExperiments[0]?.regimeDetected ?? null,
       dataQuality: latestQuality?.status ?? null,
+      universe: activeUniverse,
+      universeSize: activeUniverse.length,
+      universeSource,
+      universeListedCount: latestRunMetrics.listedCount ?? null,
+      universeFloorCount: latestRunMetrics.floorCount ?? null,
+      // Кто решил этот цикл: после рестарта процесса берём сохранённое решение из БД
+      planner: autonomousScheduler.getPlannerDecision() ?? latestRunMetrics.planner ?? null,
       autopilot: {
         enabled: autopilot.enabled,
         cyclesCompleted: autopilot.cyclesCompleted,

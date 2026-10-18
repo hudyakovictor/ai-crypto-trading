@@ -30,14 +30,14 @@ export function glassboxAnalyze(
   const badLift = f.lift.filter((l) => l.lift < -5 && l.n >= 3);
   const bestGrid = f.grid.filter((g) => g.n >= 8).reduce<typeof f.grid[0] | null>((a, b) => (!a || b.exp > a.exp ? b : a), null);
   const topErr = f.errors[0];
-  const P = () => `ПАРАМЕТРЫ: EVS=${rec.minEvs}, категорий=${rec.minCategories}, гипотез=${rec.maxHypothesesPerCycle}`;
+  const P = () => `ПАРАМЕТРЫ: EVS=${rec.minEvs}, категорий=${rec.minCategories}`;
 
   const n = (x: number, d = 1) => x.toFixed(d);
 
   switch (scope) {
     case "signal_today":
       L.push(
-        `1. ГЛАВНЫЙ КАНДИДАТ: ${f.combos[0] ? `${f.combos[0].code} — EVS ${f.combos[0].evs}/100, связка ${f.combos[0].cats.join(" + ")}` : "комбинации цикла не сгенерированы"}.`,
+        `1. ГЛАВНЫЙ КАНДИДАТ: ${f.combos[0] ? `${f.combos[0].asset} · ${f.combos[0].code} — EVS ${f.combos[0].evs}/100, связка ${f.combos[0].cats.join(" + ")}` : "комбинации цикла не сгенерированы"}.`,
         best
           ? `2. ИСТОРИЧЕСКАЯ ОПОРА: методика «${best.sig}» даёт n=${best.n}, hit-rate ${n(best.hr)}%, Wilson LB ${n(best.lb * 100, 0)}%, expectancy ${n(best.exp)} bps — ${best.n >= 8 && best.lb >= 0.55 ? "статистически подтверждена, можно доверять объём" : "выборки мало, только paper-size"}.`
           : "2. Лидерборд пуст — торговать не на чем, нужен набор истории.",
@@ -54,9 +54,9 @@ export function glassboxAnalyze(
         `1. ЦЕЛЬ НАСТРОЙКИ: максимум expectancy при достаточной выборке для обучения. Сейчас разрешено ${stats.resolved} исходов, expectancy ${n(f.expectancyBps)} bps.`,
         `2. СЕТКА ПОРОГОВ ПОКАЗЫВАЕТ: ${f.grid.filter((g) => g.n >= 8).map((g) => `EVS≥${g.cut} → ${n(g.hr, 0)}% / ${n(g.exp)} bps (n=${g.n})`).join("; ")}.`,
         bestGrid
-          ? `3. ОПТИМУМ ПО ДОХОДНОСТИ: отсечка ${bestGrid.cut} даёт ${n(bestGrid.exp)} bps, но сжимает выборку до ${bestGrid.n}. Рекомендую EVS=${rec.minEvs} — компромисс между чистотой и скоростью накопления статистики.`
-          : `3. Выборка мала — держать низкий порог EVS=${rec.minEvs} для массового набора.`,
-        `4. ОБЪЁМ ТЕСТИРОВАНИЯ: ${rec.maxHypothesesPerCycle} гипотез за цикл. При ${stats.resolved} исходах приоритет — ${stats.resolved < 150 ? "скорость: нерелевантное отсеется статистикой, полезное осядет в памяти" : "качество отбора, снижаем поток"}.`,
+          ? `3. ОПТИМУМ ПО ДОХОДНОСТИ: отсечка ${bestGrid.cut} даёт ${n(bestGrid.exp)} bps, но оставляет выборку ${bestGrid.n}. Рекомендую EVS=${rec.minEvs} — компромисс между чистотой сигнала и тем, чтобы у обучения вообще оставался материал.`
+          : `3. Исходов мало (${stats.resolved}) — задранный порог был бы отсеиванием наугад, держим EVS=${rec.minEvs}.`,
+        `4. СКОЛЬКО ТЕСТИРОВАТЬ: решение не твоё и не ползунка — его принимает планировщик цикла; ${rec.maxHypothesesPerCycle} — только страховочный потолок записей. Ставки бумажные, поэтому приоритет один: чистота отбора, шум дороже пустого цикла.`,
         `5. КАТЕГОРИИ НА ИСКЛЮЧЕНИЕ: ${badLift.length ? badLift.map((l) => `${l.ru} (${n(l.lift)} п.п., n=${l.n})`).join("; ") : "нет — все категории нейтральны или полезны"}.`,
         `6. НАПРАВЛЕНИЯ: ${f.dirStats.filter((d) => d.n > 0).map((d) => `${d.d} n=${d.n}, ${n(d.hr, 0)}%, ${n(d.exp)} bps`).join("; ")} → оставить ${rec.directions.join(", ")}.`,
         `7. ${P()}`
@@ -68,7 +68,7 @@ export function glassboxAnalyze(
         const strong = c.evs >= Math.max(70, rec.minEvs + 15);
         const ok = c.evs >= rec.minEvs;
         L.push(
-          `${i + 1}. ${c.code} — ${strong ? "ТОРГОВАТЬ" : ok ? "НАБЛЮДАТЬ" : "ОТКЛОНИТЬ"}. EVS ${c.evs}; связка ${c.cats.join(" + ")}${c.cats.length > 3 ? "; много компонентов — проверь дубли по смыслу" : ""}.`
+          `${i + 1}. ${c.asset} · ${c.code} — ${strong ? "ТОРГОВАТЬ" : ok ? "НАБЛЮДАТЬ" : "ОТКЛОНИТЬ"}. EVS ${c.evs}; связка ${c.cats.join(" + ")}${c.cats.length > 3 ? "; много компонентов — проверь дубли по смыслу" : ""}.`
         );
       });
       L.push(
@@ -183,7 +183,7 @@ export function glassboxAnalyze(
         `1. ТЕКУЩЕЕ СОСТОЯНИЕ: $${stats.pnl} из $${GOAL_USD} (${n(stats.goalPct)}%), осталось $${n(left, 0)}.`,
         `2. ЭКОНОМИКА СДЕЛКИ: expectancy ${n(f.expectancyBps)} bps × $${NOTIONAL_PER_TRADE} = $${n(perTrade)} на сигнал.`,
         perTrade > 0
-          ? `3. ДИСТАНЦИЯ: ≈ ${trades} результативных сделок. При ${rec.maxHypothesesPerCycle} гипотезах за цикл и цикле раз в 14 минут это ≈ ${Math.max(1, Math.ceil(trades / Math.max(1, rec.maxHypothesesPerCycle)))} циклов чистого времени работы автопилота.`
+          ? `3. ДИСТАНЦИЯ: ≈ ${trades} результативных исходов; при hit-rate ${n(stats.hitRate)}% это ≈ ${Math.ceil(trades / Math.max(0.01, stats.hitRate / 100))} зафиксированных прогнозов. Скорость набора — не рычаг: сколько связок оформлять за цикл решает планировщик, а ${rec.maxHypothesesPerCycle} это лишь страховочный потолок потока.`
           : "3. ДИСТАНЦИЯ: при неположительном expectancy цель недостижима — сначала чинить отбор.",
         `4. РЫЧАГ №1 — качество: поднять порог до ${bestGrid?.cut ?? rec.minEvs + 10} увеличивает expectancy до ${n(bestGrid?.exp ?? f.expectancyBps)} bps ценой сужения выборки.`,
         `5. РЫЧАГ №2 — концентрация: торговать только методики с LB ≥ 55% (${validated.length} шт.), остальное держать в paper.`,

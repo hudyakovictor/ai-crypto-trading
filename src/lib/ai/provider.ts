@@ -144,7 +144,13 @@ export function isSmallTalkQuestion(note: string): boolean {
 }
 
 export async function callProvider(
-  p: ProviderConfig & { chatExtra?: Record<string, unknown>; systemPrompt?: string; maxTokens?: number },
+  p: ProviderConfig & {
+    chatExtra?: Record<string, unknown>;
+    systemPrompt?: string;
+    maxTokens?: number;
+    /** Порог «это ещё ответ, а не мусор». Планировщику нужен короткий путь: пустой список — валидный ответ. */
+    minChars?: number;
+  },
   userPrompt: string,
   timeoutMs = 28000,
   systemPromptOverride?: string
@@ -176,7 +182,7 @@ export async function callProvider(
       usage?: { prompt_tokens?: number; completion_tokens?: number };
     };
     const text = json?.choices?.[0]?.message?.content;
-    if (!text || typeof text !== "string" || text.trim().length < 20) {
+    if (!text || typeof text !== "string" || text.trim().length < (p.minChars ?? 20)) {
       throw new Error(`${p.id}: пустой ответ модели`);
     }
     return text.trim();

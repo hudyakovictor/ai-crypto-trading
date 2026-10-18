@@ -25,8 +25,8 @@ export type ViewKey =
 
 export const VIEWS: { key: ViewKey; num: string; label: string; short: string; icon: React.ElementType }[] = [
   { key: "overview", num: "1", label: "Обзор · Command Deck", short: "Обзор", icon: LayoutDashboard },
-  { key: "combinations", num: "2", label: "Комбинации · 100 за цикл", short: "Комбо", icon: Layers },
-  { key: "heatmap", num: "3", label: "Хитмап · 3×15 сигналов", short: "Хитмап", icon: Grid3x3 },
+  { key: "combinations", num: "2", label: "Комбинации · 100 на актив", short: "Комбо", icon: Layers },
+  { key: "heatmap", num: "3", label: "Хитмап · матрица сигналов", short: "Хитмап", icon: Grid3x3 },
   { key: "ledger", num: "4", label: "Журнал · гипотезы и исходы", short: "Журнал", icon: History },
   { key: "learning", num: "5", label: "Обучение · веса категорий", short: "Обучение", icon: Brain },
   { key: "walkforward", num: "6", label: "Walk-Forward · честный тест", short: "Тест", icon: FlaskConical },
@@ -82,7 +82,6 @@ export function Sidebar({
               >
                 {v.short}
               </span>
-              <span className="num text-[12px] font-bold leading-none text-text-3/60">{v.num}</span>
             </button>
           );
         })}

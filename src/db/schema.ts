@@ -198,3 +198,17 @@ export const signalFilters = pgTable("signal_filters", {
   maxHypothesesPerCycle: integer("max_hypotheses_per_cycle").notNull().default(40),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
+
+/**
+ * Кто принимает решение об отборе гипотез. Фильтры выше — это вето человека
+ * (что вообще допустимо), эта таблица — кому принадлежит сам выбор: модели или
+ * детерминированному правилу. ceiling — страховка от потока записей, а не цель.
+ */
+export const selectionPolicy = pgTable("selection_policy", {
+  id: serial("id").primaryKey(),
+  profile: text("profile").notNull().default("default").unique(),
+  /** "ai" — решение за моделью, "rule" — детерминированное EVS-правило */
+  authority: text("authority").notNull().default("ai"),
+  ceiling: integer("ceiling").notNull().default(12),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});

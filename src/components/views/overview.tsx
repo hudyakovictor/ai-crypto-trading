@@ -1,13 +1,15 @@
 "use client";
 
-import React from "react";
+import React, { useMemo, useState } from "react";
 import {
   Activity,
   ArrowDownRight,
   ArrowUpRight,
+  Brain,
   Check,
   Clock3,
   FlaskConical,
+  Globe,
   History,
   Inbox,
   Minus,
@@ -23,13 +25,18 @@ import type {
   HeatmapResponse,
   LedgerResponse,
   LearningResponse,
+  PlannerDecisionRow,
+  PlannerMode,
   StatusResponse,
+  UniverseMemberRow,
+  UniverseSource,
   WalkForwardResponse,
 } from "@/lib/ui-types";
 import {
   CATEGORY_RU,
   CATEGORY_SHORT,
   fmtClock,
+  fmtCompact,
   fmtPct,
   fmtPrice,
   fmtSigned,
@@ -105,7 +112,17 @@ function AssetCard({
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <span className="num text-[15px] font-bold tracking-tight text-text-1">{symbol.replace("-USDT", "")}</span>
-          <span className="num text-[13px] text-text-3">/ USDT · OKX</span>
+          <span className="num text-[13px] text-text-3">/ USDT</span>
+          {asset.role === "explore" && (
+            <span className="num rounded-[4px] border border-dashed border-border-strong px-1 text-[13px] text-text-3">
+              разведка
+            </span>
+          )}
+          {asset.dataLive === false && (
+            <span className="num text-[13px]" style={{ color: "var(--amber)" }}>
+              синтетика
+            </span>
+          )}
         </div>
         <Tip
           align="end"
@@ -144,7 +161,7 @@ function AssetCard({
       </div>
 
       {/* Cat dots — 15 категорий */}
-      <div className="mt-2 flex items-center justify-between">
+      <div className="mt-2 flex items-center">
         <div className="flex items-center gap-[3px]">
           {cats.slice(0, 15).map((c) => {
             const sig = asset.signals?.[c];
@@ -170,7 +187,6 @@ function AssetCard({
             );
           })}
         </div>
-        <span className="num text-[13px] uppercase tracking-wider text-text-3">15 кат.</span>
       </div>
 
       {/* EVS footer */}
@@ -199,8 +215,227 @@ function AssetCard({
   );
 }
 
-/* ============================= Stats strip ============================= */
+/* ============================= Universe strip ============================= */
 
+const UNIVERSE_SOURCE_RU: Record<UniverseSource, string> = {
+  memory: "текущий цикл",
+  persisted: "последний цикл",
+  "live-scan": "живой скан",
+  none: "нет данных",
+};
+
+/**
+ * Полоса вселенной: состав пар, который система собрала сама.
+ * Клик по чипу разворачивает числовое обоснование отбора и переводит панель
+ * «Топ комбинации» на этот актив. Тултипы здесь не помогут — прозрачность
+ * должна быть видна, а не спрятана под курсор.
+ */
+function UniverseStrip({
+  universe,
+  source,
+  listedCount,
+  floorCount,
+  selected,
+  onSelectAsset,
+}: {
+  universe: UniverseMemberRow[];
+  source: UniverseSource;
+  listedCount?: number | null;
+  floorCount?: number | null;
+  selected: string;
+  onSelectAsset: (symbol: string) => void;
+}) {
+  const [open, setOpen] = useState<string | null>(null);
+  if (universe.length === 0) return null;
+
+  const detail = universe.find((m) => m.symbol === open) ?? null;
+  const exploreCount = universe.filter((m) => m.role === "explore").length;
+  const staleCount = universe.filter((m) => !m.dataLive).length;
+
+  return (
+    <section className="anim-fade-up rounded-[10px] border border-border bg-surface">
+      <div className="flex items-center gap-3 px-3 py-2">
+        <div className="flex shrink-0 items-center gap-1.5">
+          <Globe className="size-3.5 text-accent" strokeWidth={2} />
+          <span className="text-[13px] font-semibold uppercase tracking-[0.14em] text-text-3">
+            Вселенная
+          </span>
+        </div>
+
+        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
+          {universe.map((m) => {
+            const isOpen = open === m.symbol;
+            const isActive = selected === m.symbol;
+            return (
+              <button
+                key={m.symbol}
+                type="button"
+                onClick={() => {
+                  setOpen(isOpen ? null : m.symbol);
+                  onSelectAsset(m.symbol);
+                }}
+                title={m.reason}
+                className={`hoverable pressable inline-flex items-center gap-1.5 rounded-[5px] border bg-surface2 px-1.5 py-[3px] text-[13px] font-medium transition-colors ${
+                  isActive ? "text-accent" : "text-text-1 hover:text-accent"
+                } ${isOpen || isActive ? "border-[rgba(91,141,238,0.55)]" : "border-border-strong"}`}
+                style={m.role === "explore" ? { borderStyle: "dashed" } : undefined}
+              >
+                <span className="num">{m.symbol.replace("-USDT", "")}</span>
+                <span className="num text-text-3">{m.score}</span>
+                {!m.dataLive && (
+                  <span
+                    className="size-[5px] rounded-full"
+                    style={{ background: "var(--amber)" }}
+                    aria-label="нет живых данных"
+                  />
+                )}
+              </button>
+            );
+          })}
+        </div>
+
+        <span className="num shrink-0 text-[13px] text-text-3">
+          {universe.length} из {floorCount ?? "—"} исполнимых
+          {listedCount ? ` · ${listedCount} листингов` : ""} · {UNIVERSE_SOURCE_RU[source]}
+        </span>
+      </div>
+
+      {detail ? (
+        <div className="flex flex-wrap items-center gap-x-5 gap-y-2 border-t border-border px-3 py-2">
+          <span className="num text-[13px] font-semibold text-text-1">
+            {detail.symbol.replace("-USDT", "")} · {detail.role === "core" ? "ядро" : "разведка"}
+          </span>
+          <span className="text-[13px] text-text-3">{detail.reason}</span>
+          <div className="flex items-center gap-3">
+            {([
+              ["ликвидность", detail.components.liquidity, "var(--accent)"],
+              ["волатильность", detail.components.volatility, "var(--green)"],
+              ["RS к BTC", detail.components.relativeStrength, "var(--amber)"],
+              ["turnover", detail.components.turnover, "var(--blue)"],
+            ] as const).map(([label, value, color]) => (
+              <span key={label} className="flex items-center gap-1.5">
+                <span className="text-[13px] text-text-3">{label}</span>
+                <span className="h-[3px] w-10 overflow-hidden rounded-full bg-[rgba(255,255,255,0.07)]">
+                  <span
+                    className="block h-full rounded-full"
+                    style={{ width: `${Math.round(value * 100)}%`, background: color }}
+                  />
+                </span>
+                <span className="num text-[13px] text-text-2">{Math.round(value * 100)}</span>
+              </span>
+            ))}
+          </div>
+          <span className="num text-[13px] text-text-3">
+            объём {fmtCompact(detail.volumeUsd)} · спред {detail.spreadBps.toFixed(1)} bps
+          </span>
+        </div>
+      ) : (
+        <div className="border-t border-border px-3 py-1.5 text-[13px] text-text-3">
+          Пары отобраны самим циклом: пол ликвидности → мерит-скор → слот разведки. Клик по паре —
+          пересчитать панель «Топ комбинации» на этом активе
+          {exploreCount > 0 ? `, пунктиром — ${exploreCount} слот(а) разведки` : ""}
+          {staleCount > 0 ? `, янтарь — ${staleCount} без живых данных (гипотез по ним нет)` : ""}.
+        </div>
+      )}
+    </section>
+  );
+}
+
+/* ============================= Planner decision strip ============================= */
+
+const PLANNER_MODE_META: Record<PlannerMode, { label: string; tone: "accent" | "neutral" | "warn" }> = {
+  ai: { label: "решил ИИ", tone: "accent" },
+  rule: { label: "решило правило", tone: "neutral" },
+  fallback: { label: "запасное правило", tone: "warn" },
+};
+
+/**
+ * Полоса решения цикла. Главное, что здесь должно быть видно: сколько гипотез
+ * оформлять и какие — решает модель, а не ползунок. Потолок записей — страховка
+ * от потока, и «взято 2 из 16» при потолке 12 является полноценным решением.
+ */
+function PlannerStrip({ decision }: { decision: PlannerDecisionRow | null }) {
+  const [open, setOpen] = useState(false);
+  if (!decision) return null;
+
+  const meta = PLANNER_MODE_META[decision.mode];
+  const picked = decision.picks.length;
+  const who = decision.model ?? decision.provider ?? "без провайдера";
+
+  return (
+    <section className="anim-fade-up rounded-[10px] border border-border bg-surface">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2">
+        <div className="flex shrink-0 items-center gap-1.5">
+          <Brain className="size-3.5 text-accent" strokeWidth={2} />
+          <span className="text-[13px] font-semibold uppercase tracking-[0.14em] text-text-3">
+            Решение цикла
+          </span>
+        </div>
+        <Pill tone={meta.tone} dot={decision.mode === "ai"}>
+          {meta.label}
+        </Pill>
+        <span className="num text-[13px] text-text-2">
+          {picked} из {decision.offered} кандидатов · потолок {decision.ceiling} (страховка, не план)
+        </span>
+        <span className="num text-[13px] text-text-3">
+          {(decision.latencyMs / 1000).toFixed(1)} с · {who}
+        </span>
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="hoverable ml-auto text-[13px] text-text-3 hover:text-accent"
+        >
+          {open ? "свернуть" : picked > 0 ? "что взято" : "почему ничего"}
+        </button>
+      </div>
+
+      <div className="border-t border-border px-3 py-1.5 text-[13px] leading-relaxed text-text-1">
+        {decision.narrative || "решение не записано"}
+        {decision.error ? (
+          <span className="text-text-3"> · сбой: {decision.error.slice(0, 120)}</span>
+        ) : null}
+      </div>
+
+      {open ? (
+        <div className="border-t border-border px-3 py-2">
+          {picked === 0 ? (
+            <p className="text-[13px] text-text-3">
+              Ноль гипотез — это не пустой цикл, а отказ ставить на шум: на бумажном исполнении
+              объём ставок ничего не приносит, а сомнительная гипотеза стоит калибровке весов.
+            </p>
+          ) : (
+            <ul className="space-y-1.5">
+              {decision.picks.map((p) => (
+                <li key={p.code} className="flex items-start gap-2.5">
+                  <span className="num w-[104px] shrink-0 text-[13px] font-semibold text-text-1">
+                    {p.asset.replace("-USDT", "")}
+                    <span className="ml-1 font-normal" style={{ color: p.direction === "UP" ? "var(--green)" : "var(--red)" }}>
+                      {p.direction === "UP" ? "▲" : "▼"}
+                    </span>
+                  </span>
+                  <span className="w-[52px] shrink-0">
+                    <span className="num text-[13px] text-text-2">{(p.conviction * 100).toFixed(0)}%</span>
+                    <MeterBar value={p.conviction * 100} tone={p.conviction >= 0.7 ? "bull" : "info"} height={3} />
+                  </span>
+                  <span className="min-w-0 flex-1 text-[13px] text-text-2">
+                    <span className="num text-text-3">{p.code}</span> · EVS {p.evs ?? "—"} · {p.why}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+          {decision.dropped.length > 0 ? (
+            <p className="mt-2 text-[13px] text-text-3">
+              Отброшено при валидации: {decision.dropped.map((d) => `${d.code} — ${d.reason}`).join("; ")}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+/* ============================= Stats strip ============================= */
 function StatCell({
   label,
   value,
@@ -226,19 +461,6 @@ function StatCell({
     </div>
   );
   return tip ? <Tip label={tip} className="h-full cursor-help">{inner}</Tip> : inner;
-}
-
-function outcomeDot(o: string | null, i: number) {
-  const color =
-    o === "hit" ? "var(--green)" : o === "miss" ? "var(--red)" : o === "ambiguous" ? "var(--amber)" : "var(--blue)";
-  return (
-    <span
-      key={i}
-      className={o ? "size-[7px] rounded-full" : "size-[7px] rounded-full pulse-dot"}
-      style={{ background: color, opacity: o ? 0.35 + (i / 8) * 0.65 : 1 }}
-      title={o ?? "pending"}
-    />
-  );
 }
 
 /* ============================= Compact heatmap ============================= */
@@ -315,9 +537,7 @@ function HeatmapCompact({ heatmap }: { heatmap: ApiState<HeatmapResponse> }) {
           <div className="h-1.5 w-24 rounded-full" style={{ background: "linear-gradient(90deg, rgba(245,101,101,0.9), rgba(245,101,101,0.15), rgba(96,165,250,0.1), rgba(34,211,160,0.15), rgba(34,211,160,0.9))" }} />
           <span>+1.0</span>
         </div>
-        <span className="num text-[13px] text-text-3">
-          {heatmap.data.isLive ? "OKX LIVE" : "SYNTH"} · обновлено {fmtClock(heatmap.data.updatedAt)}
-        </span>
+        <span className="num text-[13px] text-text-3">обновлено {fmtClock(heatmap.data.updatedAt)}</span>
       </div>
     </div>
   );
@@ -347,7 +567,7 @@ function TopCombos({ combos, onOpenView }: { combos: ApiState<CombinationsRespon
       <EmptyState
         icon={<Inbox className="size-4.5" strokeWidth={1.6} />}
         title="Комбинации ещё не сгенерированы"
-        text="Запустите исследовательский цикл — движок оценит 100 комбинаций по 15 категориям сигналов."
+        text="Запустите исследовательский цикл — движок соберёт вселенную и связки по 15 категориям, а планировщик решит, какие из них стоят гипотезы."
       />
     );
 
@@ -388,9 +608,7 @@ function TopCombos({ combos, onOpenView }: { combos: ApiState<CombinationsRespon
                 </span>
                 {dirArrow(c.targetDirection)}
                 <span className="num w-[126px] truncate text-[14px] font-medium text-text-1">{c.code}</span>
-                <span className="num w-[72px] rounded border border-border bg-surface2 px-1 py-px text-center text-[13px] text-text-3">
-                  {c.operator}
-                </span>
+                <span className="num w-[16px] text-center text-[13px] text-text-3">{c.operator}</span>
                 <span className="hidden min-w-0 flex-1 items-center gap-1 2xl:flex">
                   {c.categories.slice(0, 4).map((cat) => (
                     <span key={cat} className="num rounded bg-[rgba(255,255,255,0.045)] px-1 py-px text-[13px] text-text-3">
@@ -410,13 +628,13 @@ function TopCombos({ combos, onOpenView }: { combos: ApiState<CombinationsRespon
       </div>
       <div className="mt-1 flex items-center justify-between border-t border-border px-1 pt-2">
         <span className="num text-[13px] text-text-3">
-          100/цикл · <span style={{ color: "var(--accent)" }}>{s.promisingCount} promising</span> · {s.candidatesCount} candidates · avg {s.avgScore}
+          {combos.data.totalCount} связок в пуле · <span style={{ color: "var(--accent)" }}>{s.promisingCount} promising</span> · {s.candidatesCount} candidates · avg {s.avgScore}
         </span>
         <button
           onClick={() => onOpenView("combinations")}
           className="hoverable pressable text-[13px] font-medium text-accent hover:text-text-1"
         >
-          Все 100 →
+          Весь пул →
         </button>
       </div>
     </div>
@@ -619,6 +837,8 @@ export function OverviewView({
   ledger,
   learning,
   walkforward,
+  asset,
+  onSelectAsset,
   onOpenView,
 }: {
   status: ApiState<StatusResponse>;
@@ -627,16 +847,28 @@ export function OverviewView({
   ledger: ApiState<LedgerResponse>;
   learning: ApiState<LearningResponse>;
   walkforward: ApiState<WalkForwardResponse>;
+  asset: string;
+  onSelectAsset: (symbol: string) => void;
   onOpenView: (v: ViewKey) => void;
 }) {
   const stats = status.data?.stats;
-  const topAssetSymbol = heatmap.data?.assets.length
-    ? [...heatmap.data.assets].sort((a, b) => b.topEvs - a.topEvs)[0].symbol
-    : null;
+  // Герой-карточки — три сильнейших актива вселенной по EVS, а не фиксированный
+  // список: если лучший сигнал сейчас на SOL-подобной паре, он должен быть на виду.
+  const heroSymbols = useMemo(
+    () =>
+      heatmap.data?.assets
+        ? [...heatmap.data.assets]
+            .sort((a, b) => b.topEvs - a.topEvs)
+            .slice(0, 3)
+            .map((a) => a.symbol)
+        : [],
+    [heatmap.data]
+  );
+  const topAssetSymbol = heroSymbols[0] ?? null;
+  const universe = status.data?.universe ?? [];
   const hitTone =
     (stats?.empiricalHitRate ?? 0) >= 55 ? "var(--green)" : (stats?.empiricalHitRate ?? 0) >= 48 ? "var(--amber)" : "var(--red)";
   const brier = stats?.averageBrierScore ?? 0.25;
-  const recentOutcomes = (status.data?.recentForecasts ?? []).slice(0, 8).reverse();
   const lastRun = status.data?.scheduler.lastRunTime ?? null;
 
   return (
@@ -648,15 +880,35 @@ export function OverviewView({
         steps={[
           { t: "Ищите бейдж «СИЛЬНЕЙШИЙ СИГНАЛ»", d: "актив с максимальным EVS — главный кандидат в сделку прямо сейчас" },
           { t: "Проверьте Hit Rate и Brier", d: "hit rate ≥ 55% и Brier ≤ 0.20 — модель в форме; хуже — снизьте риск" },
-          { t: "Ниже — причины сигнала", d: "хитмап показывает давление по 15 категориям, справа — лучшие связки цикла" },
+          { t: "Состав пар выбирает сам цикл", d: "полоса «Вселенная» — активы, прошедшие пол ликвидности и мерит-скор; клик по чипу раскрывает цифры отбора" },
+          { t: "Сколько гипотез — решает модель", d: "в полосе «Решение цикла» видно взято N из M; потолок — страховка от потока, а не план, и 0 — полноценный ответ" },
         ]}
       />
 
+      {/* ——— Вселенная: какие пары система выбрала сама и почему ——— */}
+      <UniverseStrip
+        universe={universe}
+        source={status.data?.universeSource ?? "none"}
+        listedCount={status.data?.universeListedCount}
+        floorCount={status.data?.universeFloorCount}
+        selected={asset}
+        onSelectAsset={onSelectAsset}
+      />
+
+      {/* ——— Кто решил этот цикл и сколько гипотез он счёл нужным оформить ——— */}
+      <PlannerStrip decision={status.data?.planner ?? null} />
+
       {/* ——— Command center: asset cards ——— */}
       <div className="grid gap-3 md:grid-cols-3 anim-fade-up">
-        {["BTC-USDT", "ETH-USDT", "SOL-USDT"].map((sym) => (
-          <AssetCard key={sym} symbol={sym} heatmap={heatmap} strongest={sym === topAssetSymbol} />
-        ))}
+        {heroSymbols.length > 0 ? (
+          heroSymbols.map((sym) => (
+            <AssetCard key={sym} symbol={sym} heatmap={heatmap} strongest={sym === topAssetSymbol} />
+          ))
+        ) : (
+          ["BTC-USDT", "ETH-USDT", "SOL-USDT"].map((sym) => (
+            <AssetCard key={sym} symbol={sym} heatmap={heatmap} strongest={false} />
+          ))
+        )}
       </div>
 
       {/* ——— Stats strip ——— */}
@@ -673,7 +925,7 @@ export function OverviewView({
             </div>
           }
         >
-          <span className="flex items-center gap-1">{recentOutcomes.map((f, i) => outcomeDot(f.outcome, i))}</span>
+          <span className="text-[13px] text-text-3">{stats ? `${stats.hits}/${stats.misses}` : ""}</span>
         </StatCell>
         <StatCell
           label="Brier Score · калибровка"
@@ -696,11 +948,10 @@ export function OverviewView({
             <div>
               <TipRow k="Новейшая" v={status.data?.activeHypotheses[0]?.code ?? "—"} />
               <TipRow k="Отслеживается активов" v={String(stats?.totalAssetsTracked ?? 0)} />
+              <TipRow k="В выборке цикла" v={String(status.data?.universeSize ?? 0)} />
             </div>
           }
-        >
-          <Pill tone="accent" dot={!!stats?.activeHypothesesCount}>LIVE</Pill>
-        </StatCell>
+        />
         <StatCell
           label="Последний цикл"
           value={lastRun ? timeAgo(lastRun) : "—"}
@@ -720,7 +971,7 @@ export function OverviewView({
       <div className="grid gap-3 xl:grid-cols-12 anim-fade-up" style={{ animationDelay: "80ms" }}>
         <Panel
           title="Хитмап сигналов"
-          sub="3 актива × 15 категорий · цвет = направление, интенсивность = сила |score|"
+          sub={`${heatmap.data?.assets.length ?? 0} активов вселенной × 15 категорий · цвет = направление, интенсивность = сила |score|`}
           className="xl:col-span-7"
           actions={
             <button onClick={() => onOpenView("heatmap")} className="hoverable pressable text-[13px] font-medium text-accent hover:text-text-1">
@@ -732,10 +983,26 @@ export function OverviewView({
         </Panel>
         <Panel
           title="Топ комбинации"
-          sub={combos.data ? `BTC-USDT · ${combos.data.regime.replace(/_/g, " ")}` : "по EVS"}
+          sub={
+            combos.data
+              ? `${combos.data.symbol.replace("-USDT", "")} · ${combos.data.regime.replace(/_/g, " ")}${
+                  combos.data.dataLive === false ? " · синтетические свечи" : ""
+                }`
+              : "по EVS"
+          }
           className="xl:col-span-5"
           pad={false}
-          actions={<AiButton scope="combo_audit" title="Аудит комбинаций" compact />}
+          actions={
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => onOpenView("combinations")}
+                className="hoverable pressable text-[13px] font-medium text-accent hover:text-text-1"
+              >
+                Все связки →
+              </button>
+              <AiButton scope="combo_audit" title="Аудит комбинаций" compact />
+            </div>
+          }
         >
           <div className="h-full p-2">
             <TopCombos combos={combos} onOpenView={onOpenView} />

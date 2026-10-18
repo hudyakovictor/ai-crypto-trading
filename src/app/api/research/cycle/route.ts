@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
 import { autonomousScheduler } from "@/lib/quant/autonomous-scheduler";
 
+/** Цикл теперь включает решение модели об отборе: бюджет времени выше прежних 30 с. */
+export const maxDuration = 75;
+
 export async function POST(req: Request) {
   try {
     let isManual = true;

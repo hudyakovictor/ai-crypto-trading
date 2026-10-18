@@ -1,9 +1,17 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { Bot, ChevronDown, ChevronUp, Eraser, KeyRound, Loader2, RotateCcw, Save, Settings2, Sparkles, Trash2, X } from "lucide-react";
+import { Bot, Brain, ChevronDown, ChevronUp, Eraser, KeyRound, Loader2, RotateCcw, Save, Settings2, Sparkles, Trash2, X } from "lucide-react";
 import { postJson, toast } from "./data";
-import type { AiProviderPublic, AiSettingsResponse, AutopilotInfo, FiltersResponse, FiltersState } from "@/lib/ui-types";
+import type {
+  AiProviderPublic,
+  AiSettingsResponse,
+  AutopilotInfo,
+  FiltersResponse,
+  FiltersState,
+  PlannerAuthority,
+  PolicyResponse,
+} from "@/lib/ui-types";
 import { CATEGORY_RU } from "@/lib/format";
 import { Pill } from "./ui";
 
@@ -21,7 +29,8 @@ function Chip({
   return (
     <button
       onClick={onClick}
-      className={`hoverable pressable rounded-md border px-2.5 py-1.5 text-[13px] font-medium ${
+      aria-pressed={active}
+      className={`hoverable pressable whitespace-nowrap rounded-md border px-2.5 py-1.5 text-[13px] font-medium ${
         active
           ? danger
             ? "border-[rgba(245,101,101,0.45)] bg-bear-dim text-bear"
@@ -53,27 +62,56 @@ export function SettingsDrawer({
   const [aiProviders, setAiProviders] = useState<AiProviderPublic[] | null>(null);
   const [aiSaving, setAiSaving] = useState(false);
   const [aiKeys, setAiKeys] = useState<Record<string, string>>({});
+  // Политика отбора: кому принадлежит решение «сколько и каких гипотез» + потолок-страховка.
+  const [policy, setPolicy] = useState<PolicyResponse["policy"] | null>(null);
+  const [ceilingLimits, setCeilingLimits] = useState({ ceilingMin: 1, ceilingMax: 30 });
+  const [policySaving, setPolicySaving] = useState(false);
 
   useEffect(() => {
     if (!open) return;
     setConfirmReset(false);
     (async () => {
       try {
-        const [f, a, ai] = await Promise.all([
+        const [f, a, ai, pol] = await Promise.all([
           fetch("/api/research/filters", { cache: "no-store" }).then((r) => r.json()) as Promise<FiltersResponse>,
           fetch("/api/research/autopilot", { cache: "no-store" }).then((r) => r.json()),
           fetch("/api/research/ai-settings", { cache: "no-store" }).then((r) => r.json()) as Promise<AiSettingsResponse>,
+          fetch("/api/research/policy", { cache: "no-store" }).then((r) => r.json()) as Promise<PolicyResponse>,
         ]);
         setFilters(f.filters);
         setOptions(f.options);
         setAp(a.autopilot);
         if (ai.success) setAiProviders(ai.providers);
+        if (pol.success) {
+          setPolicy(pol.policy);
+          if (pol.limits) setCeilingLimits(pol.limits);
+        }
         setLoaded(true);
       } catch (e) {
         toast("err", "Не удалось загрузить настройки", e instanceof Error ? e.message : "");
       }
     })();
   }, [open]);
+
+  const patchPolicy = async (patch: { authority?: PlannerAuthority; ceiling?: number }) => {
+    if (!policy) return;
+    setPolicySaving(true);
+    try {
+      const r = await fetch("/api/research/policy", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...policy, ...patch }),
+      }).then((res) => res.json()) as PolicyResponse;
+      if (!r.success) throw new Error(r.error || "не сохранено");
+      setPolicy(r.policy);
+      toast("ok", "Политика отбора сохранена", r.message ?? "");
+      await onDataChanged();
+    } catch (e) {
+      toast("err", "Ошибка сохранения политики", e instanceof Error ? e.message : "");
+    } finally {
+      setPolicySaving(false);
+    }
+  };
 
   const save = async () => {
     if (!filters) return;
@@ -362,7 +400,7 @@ export function SettingsDrawer({
                     <Bot className="size-4.5" style={{ color: ap?.enabled ? "var(--green)" : "var(--text-3)" }} strokeWidth={1.9} />
                     <div>
                       <h3 className="text-[14px] font-bold text-text-1">Автопилот исследований</h3>
-                      <p className="text-[13px] text-text-3">цикл 100 комбо + переобучение каждые ~14 минут</p>
+                      <p className="text-[13px] text-text-3">переобучение после каждого цикла, цикл ~раз в 15 минут</p>
                     </div>
                   </div>
                   <button
@@ -393,6 +431,65 @@ export function SettingsDrawer({
                       </div>
                     </div>
                   </div>
+                )}
+              </section>
+
+              {/* ── Кто оформляет гипотезы ── */}
+              <section className="rounded-[10px] border border-border bg-surface2 p-4">
+                <div className="flex items-center gap-2.5">
+                  <Brain className="size-4.5 text-accent" strokeWidth={1.9} />
+                  <div>
+                    <h3 className="text-[14px] font-bold text-text-1">Кто решает, сколько гипотез оформлять</h3>
+                    <p className="text-[13px] leading-snug text-text-3">
+                      Ставки бумажные, поэтому объём ничего не даёт: шумная связка стоит калибровки весов. Решение
+                      «сколько и каких» у планировщика цикла, фильтры выше — только вето.
+                    </p>
+                  </div>
+                </div>
+
+                {!policy ? (
+                  <div className="flex items-center gap-2 py-4 text-[13px] text-text-3">
+                    <Loader2 className="size-4 animate-spin" /> Загрузка политики отбора…
+                  </div>
+                ) : (
+                  <>
+                    <div className="mt-3 flex gap-1.5">
+                      <Chip active={policy.authority === "ai"} onClick={() => void patchPolicy({ authority: "ai" })}>
+                        решает ИИ
+                      </Chip>
+                      <Chip
+                        active={policy.authority === "rule"}
+                        onClick={() => void patchPolicy({ authority: "rule" })}
+                      >
+                        правило EVS
+                      </Chip>
+                    </div>
+
+                    <div className="mt-4">
+                      <div className="mb-1.5 flex items-baseline justify-between">
+                        <label className="text-[13.5px] font-semibold text-text-2">Страховочный потолок за цикл</label>
+                        <span className="num text-[16px] font-bold" style={{ color: "var(--accent)" }}>
+                          {policy.ceiling}
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min={ceilingLimits.ceilingMin}
+                        max={ceilingLimits.ceilingMax}
+                        step={1}
+                        value={policy.ceiling}
+                        disabled={policySaving}
+                        onChange={(e) => setPolicy({ ...policy, ceiling: Number(e.target.value) })}
+                        onPointerUp={() => void patchPolicy({})}
+                        onKeyUp={() => void patchPolicy({})}
+                        className="w-full accent-[#5b8dee]"
+                      />
+                      <div className="mt-0.5 text-[12px] leading-snug text-text-3">
+                        Защита от потока записей, а не план: взять 2 из 20 или 0 — корректный ответ. Если модель
+                        молчит, отбор уходит на запасное правило (и это видно в полосе «Решение цикла»).
+                      </div>
+                    </div>
+                  </>
                 )}
               </section>
 

@@ -2,6 +2,7 @@ import { db } from "@/db";
 import {
   aiAnalyses,
   combinations as combinationsTable,
+  experimentRuns,
   forecasts,
   hypotheses,
   learningWeights,
@@ -9,6 +10,15 @@ import {
 import { asc, desc, eq, ne } from "drizzle-orm";
 import { CATEGORY_DEFINITIONS, CATEGORY_KEYS } from "@/lib/types";
 import { loadFilters, type FilterState } from "@/lib/filters";
+import { loadActiveUniverse } from "@/lib/quant/universe-store";
+import { loadPolicy } from "@/lib/quant/policy";
+import type { PlannerDecisionRow } from "@/lib/ui-types";
+
+/** Актив связки: до динамической вселенной все комбинации строились по BTC. */
+function comboAsset(c: { parametersJson: unknown }): string {
+  const p = (c.parametersJson ?? {}) as { asset?: unknown };
+  return typeof p.asset === "string" && p.asset.length > 0 ? p.asset : "BTC-USDT";
+}
 
 export const NOTIONAL_PER_TRADE = 5000;
 export const GOAL_USD = 15000;
@@ -41,8 +51,8 @@ export const SCOPE_META: Record<AiScope, { title: string; panel: string; descRu:
   filter_tuner: {
     title: "Настройщик фильтров",
     panel: "Настройки",
-    descRu: "Подбирает порог EVS, минимум категорий, операторы и объём тестирования под текущую статистику.",
-    ask: "Подбери оптимальные фильтры отбора сигналов: порог EVS, минимум категорий в связке, разрешённые операторы и направления, объём гипотез за цикл. Обоснуй каждое число статистикой из контекста. Помни: низкий порог = больше выборки для обучения, высокий = чище сигналы.",
+    descRu: "Подбирает вето человека: порог EVS, минимум категорий, операторы, направления, исключения.",
+    ask: "Подбери вето фильтрации сигналов: порог EVS, минимум категорий в связке, разрешённые операторы и направления, категории на исключение. Обоснуй каждое число статистикой из контекста. Количество гипотез не трогай — сколько оформлять решает планировщик цикла; ты лишь отсекаешь недопустимое. Помни: низкий порог = больше материала для обучения, высокий = чище сигналы.",
   },
   combo_audit: {
     title: "Аудит комбинаций",
@@ -133,7 +143,8 @@ export interface Facts {
   weightsTop: { ru: string; w: number; wr: number; n: number }[];
   weightsLow: { ru: string; w: number; wr: number; n: number }[];
   dirStats: { d: string; n: number; hr: number; exp: number }[];
-  combos: { code: string; evs: number; status: string; cats: string[] }[];
+  combos: { code: string; asset: string; evs: number; status: string; cats: string[] }[];
+  universe: { symbol: string; role: string; score: number }[];
   pendingCount: number;
   expectancyBps: number;
 }
@@ -177,6 +188,19 @@ export async function buildContext(scope: AiScope, userNote?: string): Promise<F
     .from(combinationsTable)
     .orderBy(desc(combinationsTable.earlyValueScore))
     .limit(12);
+  // Вселенная отбора: ИИ обязан знать, что состав пар выбирает сам цикл,
+  // иначе его выводы «почему только BTC» будут построены на несуществующем правиле.
+  const universe = await loadActiveUniverse().catch(() => null);
+  // Кто решает отбор и что он решил в последнем цикле — без этого аналитик
+  // продолжал бы советовать «увеличить число гипотез», чего движок больше не делает.
+  const policy = await loadPolicy();
+  const runRow = await db
+    .select({ metricsJson: experimentRuns.metricsJson })
+    .from(experimentRuns)
+    .orderBy(desc(experimentRuns.createdAt))
+    .limit(1)
+    .catch(() => [] as { metricsJson: unknown }[]);
+  const lastDecision = ((runRow[0]?.metricsJson ?? {}) as { planner?: PlannerDecisionRow }).planner ?? null;
   // Болтовня (smalltalk) в исследовательскую память не попадает — только предметные разборы.
   const memory = await db
     .select()
@@ -284,13 +308,15 @@ export async function buildContext(scope: AiScope, userNote?: string): Promise<F
   const negCats = lift.filter((l) => l.lift < -8 && l.n >= 3).map((l) => l.cat);
   const goodDirs = dirStats.filter((x) => x.n < 3 || x.exp > -5).map((x) => x.d);
   const recDirs = goodDirs.length ? goodDirs : ["UP", "DOWN"];
-  const recMaxHyps = decided.length < 150 ? 60 : decided.length < 400 ? 40 : 25;
+  // Количество больше не рекомендация движка: сколько оформлять связок решает
+  // планировщик цикла. В этом объекте живёт только страховочный потолок.
+  const recCeiling = policy.ceiling;
   const recMinCats = decided.length < 100 ? 2 : leaders.some((l) => l.n >= 8 && l.lb >= 0.55) ? 3 : 2;
 
   const recommended: RecommendedParams = {
     minEvs: recMinEvs,
     minCategories: recMinCats,
-    maxHypothesesPerCycle: recMaxHyps,
+    maxHypothesesPerCycle: recCeiling,
     operators: ["WEIGHTED", "AND", "OR", "VETO"],
     directions: recDirs,
     regimeLock: "ANY",
@@ -298,9 +324,9 @@ export async function buildContext(scope: AiScope, userNote?: string): Promise<F
     rationale: [
       bestGrid
         ? `Порог EVS ${recMinEvs}: сетка показала максимум expectancy ${bestGrid.exp.toFixed(1)} bps при отсечке ${bestGrid.cut} (n=${bestGrid.n}); берём на 5 пунктов ниже, чтобы не потерять выборку для обучения.`
-        : `Порог EVS ${recMinEvs}: выборки пока мало (${decided.length} исходов) — держим низкий порог ради массового набора статистики.`,
-      `Минимум категорий ${recMinCats}: ${recMinCats >= 3 ? "есть подтверждённые многофакторные связки — требуем большей конфлюэнции" : "фаза набора данных, не сужаем пространство поиска"}.`,
-      `Объём ${recMaxHyps} гипотез за цикл: при ${decided.length} исходах приоритет — ${decided.length < 150 ? "скорость накопления истории" : "качество отбора"}.`,
+        : `Порог EVS ${recMinEvs}: исходов пока мало (${decided.length}) — задранный порог был бы отсеиванием наугад.`,
+      `Минимум категорий ${recMinCats}: ${recMinCats >= 3 ? "есть подтверждённые многофакторные связки — требуем большей конфлюэнции" : "подтверждённой многофакторности пока нет — не сужаем пространство поиска"}.`,
+      `Потолок ${recCeiling} записей за цикл — это страховка от потока, а не план: сколько связок оформлять решает планировщик (${policy.authority === "ai" ? "модель" : "правило"}), ${lastDecision ? `в последнем цикле он взял ${lastDecision.picks.length} из ${lastDecision.offered}` : "решения ещё нет"}. Больше гипотез ≠ лучше: исполнение бумажное, а шум бьёт по калибровке.`,
       negCats.length
         ? `Исключить ${negCats.length} категорий с отрицательным lift: ${negCats.map(ru).join(", ")}.`
         : "Категорий с устойчиво отрицательным lift пока нет — ничего не исключаем.",
@@ -324,10 +350,29 @@ export async function buildContext(scope: AiScope, userNote?: string): Promise<F
   L.push(`\n## 2. КАЧЕСТВО МОДЕЛИ
 Разрешено прогнозов: ${decided.length} (hits ${hits}, misses ${decided.length - hits}); в ожидании: ${pending.length}.
 Hit rate: ${hitRate.toFixed(1)}%. Средний Brier: ${brier.toFixed(4)} (0.25 = случайность, ≤0.20 = хорошая калибровка).
-Всего гипотез в базе: ${hypList.length}. Цикл генерирует ровно 100 комбинаций из 15 категорий.`);
+Всего гипотез в базе: ${hypList.length}. Цикл строит по 100 связок на каждый актив вселенной (N×100, а не 100 на весь рынок): это ПРОСТРАНСТВО поиска, а не план — в отбор попадает короткий список кандидатов, и сколько из них оформить гипотезами решает планировщик.`);
 
-  L.push(`\n## 3. ТЕКУЩИЕ ФИЛЬТРЫ ОТБОРА (что стоит сейчас)
-Порог EVS: ${current.minEvs}; минимум категорий: ${current.minCategories}; гипотез за цикл: ${current.maxHypothesesPerCycle}.
+  L.push(`\n## 2b. ВСЕЛЕННАЯ ОТБОРА (состав выбирает цикл, не человек)
+${universe ? universe.universe.map((u) => `${u.symbol} [${u.role === "core" ? "ядро" : "разведка"}] отбор-скор ${u.score}`).join("; ") : "состав ещё не сформирован — первый цикл не завершён"}.
+Отбор: пол исполнимости (объём ≥ $3M/24h, спред ≤ 10 bps, стейблкоины отброшены) → merit-скор (ликвидность 0.30, волатильность 0.28, |RS к BTC| 0.22, turnover 0.20) → анти-толпа и слоты разведки. BTC — якорь, он в составе всегда.`);
+
+  L.push(
+    `\n## 2c. ОТБОР ГИПОТЕЗ РЕШАЕТ МОДЕЛЬ (не ползунок)
+Политика: кому принадлежит выбор — ${policy.authority === "ai" ? "моделю-планировщику" : "детерминированному EVS-правилу"}; страховочный потолок ${policy.ceiling} записей за цикл (защита от потока, а не цель).
+${
+      lastDecision
+        ? `Последнее решение: режим «${lastDecision.mode}», предложено ${lastDecision.offered} связок, взято ${lastDecision.picks.length}, средняя уверенность ${
+            lastDecision.picks.length
+              ? (lastDecision.picks.reduce((a, p) => a + p.conviction, 0) / lastDecision.picks.length).toFixed(2)
+              : "—"
+          }. Обоснование: ${lastDecision.narrative.slice(0, 220)}`
+        : "Решений планировщика в базе ещё нет — цикл их ещё не записал."
+    }
+Ставки делаются на бумажные деньги: количество гипотез ничего не приносит, а шумная связка размывает калибровку весов. Ноль выбранных связок — корректный результат, а не поломка. Не советуй «брать больше гипотез ради скорости накопления выборки» — этого рычага больше нет.`
+  );
+
+  L.push(`\n## 3. ТЕКУЩИЕ ФИЛЬТРЫ ОТБОРА (вето человека: что вообще допустимо)
+Порог EVS: ${current.minEvs}; минимум категорий: ${current.minCategories}; страховочный потолок записей: ${policy.ceiling} (сколько из допущенного оформлять — решает планировщик).
 Операторы: ${current.operators.join(", ")}. Направления: ${current.directions.join(", ")}. Режимный замок: ${current.regimeLock}.
 Исключённые категории: ${current.excludedCategories.length ? current.excludedCategories.map(ru).join(", ") : "нет"}.`);
 
@@ -350,8 +395,8 @@ ${grid.map((g) => `EVS ≥ ${g.cut} | n=${g.n} | ${g.hr.toFixed(1)}% | ${g.exp.t
 ${errors.map(([t, c]) => `${t}: ${c}`).join("; ") || "промахов нет"}
 Справочник: weak_signal — вход без запаса силы; cost_drag — издержки съели edge; wrong_horizon — цель бралась, затем разворот; regime_mismatch — сигнал вне своего режима; wrong_sign — противоположное движение.`);
 
-  L.push(`\n## 9. ТОП КОМБИНАЦИЙ ТЕКУЩЕГО ЦИКЛА
-${combos.slice(0, 8).map((c) => `${c.code} | EVS ${Math.round(c.earlyValueScore)} | ${c.status} | ${(Array.isArray(c.categoriesJson) ? (c.categoriesJson as string[]) : []).map(ru).join(" + ")}`).join("\n") || "нет данных"}`);
+  L.push(`\n## 9. ТОП КОМБИНАЦИЙ ПОСЛЕДНИХ ЦИКЛОВ (код | актив | EVS | статус | связка)
+${combos.slice(0, 8).map((c) => `${c.code} | ${comboAsset(c)} | EVS ${Math.round(c.earlyValueScore)} | ${c.status} | ${(Array.isArray(c.categoriesJson) ? (c.categoriesJson as string[]) : []).map(ru).join(" + ")}`).join("\n") || "нет данных"}`);
 
   L.push(`\n## 10. НАПРАВЛЕНИЯ
 ${dirStats.map((x) => `${x.d}: n=${x.n}, HR ${x.hr.toFixed(1)}%, ${x.exp.toFixed(1)} bps`).join("; ")}`);
@@ -360,11 +405,11 @@ ${dirStats.map((x) => `${x.d}: n=${x.n}, HR ${x.hr.toFixed(1)}%, ${x.exp.toFixed
 ${memory.map((m) => `[${new Date(m.createdAt).toISOString().slice(5, 16)}] ${m.title}: ${m.content.slice(0, 180).replace(/\n/g, " ")}…`).join("\n") || "память пуста — это первый анализ"}`);
 
   L.push(`\n## 12. ПРЕДВАРИТЕЛЬНО РАССЧИТАННЫЕ РЕКОМЕНДАЦИИ (оспорь или подтверди числами)
-Порог EVS → ${recommended.minEvs}; минимум категорий → ${recommended.minCategories}; гипотез за цикл → ${recommended.maxHypothesesPerCycle}; направления → ${recommended.directions.join(",")}; исключить → ${recommended.excludedCategories.map(ru).join(", ") || "ничего"}.
+Порог EVS → ${recommended.minEvs}; минимум категорий → ${recommended.minCategories}; страховочный потолок записей → ${recommended.maxHypothesesPerCycle} (число гипотез — не твоя рекомендация, его выбирает планировщик); направления → ${recommended.directions.join(",")}; исключить → ${recommended.excludedCategories.map(ru).join(", ") || "ничего"}.
 Обоснование движка: ${recommended.rationale.join(" ")}`);
 
   L.push(`\n## ФОРМАТ ОТВЕТА
-Только русский. 5–8 пронумерованных пунктов, каждый — конкретное действие или вывод с числом из контекста. Вердикты капсом (ТОРГОВАТЬ / НАБЛЮДАТЬ / ОТКЛОНИТЬ / ДОПУСТИТЬ). Никакой воды, вступлений и дисклеймеров. Максимум 220 слов. Последним пунктом дай строку вида «ПАРАМЕТРЫ: EVS=<число>, категорий=<число>, гипотез=<число>» с твоей итоговой рекомендацией.`);
+Только русский. 5–8 пронумерованных пунктов, каждый — конкретное действие или вывод с числом из контекста. Вердикты капсом (ТОРГОВАТЬ / НАБЛЮДАТЬ / ОТКЛОНИТЬ / ДОПУСТИТЬ). Никакой воды, вступлений и дисклеймеров. Максимум 220 слов. Последним пунктом дай строку вида «ПАРАМЕТРЫ: EVS=<число>, категорий=<число>» с твоей итоговой рекомендацией по ВЕТУ. Количество гипотез не предлагай: его решает планировщик цикла.`);
 
   return {
     text: L.join("\n"),
@@ -380,10 +425,12 @@ ${memory.map((m) => `[${new Date(m.createdAt).toISOString().slice(5, 16)}] ${m.t
       dirStats,
       combos: combos.slice(0, 8).map((c) => ({
         code: c.code,
+        asset: comboAsset(c),
         evs: Math.round(c.earlyValueScore),
         status: c.status,
         cats: (Array.isArray(c.categoriesJson) ? (c.categoriesJson as string[]) : []).map(ru),
       })),
+      universe: (universe?.universe ?? []).map((u) => ({ symbol: u.symbol, role: u.role, score: u.score })),
       pendingCount: pending.length,
       expectancyBps: Number(expectancyBps.toFixed(1)),
     },

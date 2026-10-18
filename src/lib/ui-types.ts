@@ -21,6 +21,30 @@ export interface SchedulerInfo {
   intervalMinutes: number;
 }
 
+/** Состав вселенной — как его видит UI: числа, объясняющие отбор пары. */
+export type UniverseRole = "core" | "explore";
+
+export interface UniverseMemberRow {
+  symbol: string;
+  role: UniverseRole;
+  score: number;
+  components: {
+    liquidity: number;
+    volatility: number;
+    relativeStrength: number;
+    turnover: number;
+  };
+  reason: string;
+  lastPrice: number;
+  change24h: number;
+  volumeUsd: number;
+  spreadBps: number;
+  dataLive: boolean;
+}
+
+/** Откуда UI знает этот состав: цикл в памяти, последний записанный цикл, живой скан. */
+export type UniverseSource = "memory" | "persisted" | "live-scan" | "none";
+
 export interface AssetRow {
   id: number;
   symbol: string;
@@ -45,6 +69,14 @@ export interface StatusResponse {
   latestRegime?: string | null;
   dataQuality?: string | null;
   autopilot?: { enabled: boolean; cyclesCompleted: number; retrainsCompleted: number };
+  universe?: UniverseMemberRow[];
+  universeSize?: number;
+  universeSource?: UniverseSource;
+  /** Сколько USDT-пар листинговано и сколько прошло пол исполнимости */
+  universeListedCount?: number | null;
+  universeFloorCount?: number | null;
+  /** Кто оформил гипотезы последнего цикла — модель, правило или запас */
+  planner?: PlannerDecisionRow | null;
 }
 
 export interface SignalCell {
@@ -67,6 +99,10 @@ export interface HeatmapAsset {
   topEvs: number;
   topDirection: string;
   signals: Record<string, SignalCell>;
+  role?: UniverseRole;
+  universeScore?: number;
+  selectionReason?: string;
+  dataLive?: boolean;
 }
 
 export interface HeatmapResponse {
@@ -76,6 +112,8 @@ export interface HeatmapResponse {
   isLive: boolean;
   latencyMs: number;
   assets: HeatmapAsset[];
+  universeSource?: UniverseSource;
+  universeSize?: number;
   updatedAt: string;
 }
 
@@ -111,6 +149,8 @@ export interface CombinationsResponse {
   error?: string;
   symbol: string;
   regime: string;
+  dataLive?: boolean;
+  universe?: UniverseMemberRow[];
   totalCount: number;
   stats: {
     promisingCount: number;
@@ -333,6 +373,80 @@ export interface CycleApiResult {
   forecastsResolved: number;
   learningUpdated: boolean;
   summary: string;
+  universe?: UniverseMemberRow[];
+  trackedCount?: number;
+  planner?: PlannerDecisionRow | null;
+}
+
+/* ---------- Планировщик цикла: кто решает, сколько гипотез оформлять ---------- */
+
+/** Кому принадлежит выбор: модели («ai») или детерминированному правилу («rule»). */
+export type PlannerAuthority = "ai" | "rule";
+/** Кто РЕШИЛ на этом цикле: модель, правило или правило как запас при отказе LLM. */
+export type PlannerMode = "ai" | "rule" | "fallback";
+
+export interface PlannerPickRow {
+  code: string;
+  asset: string;
+  /** Уверенность решившего 0..1 — идёт в uncertainty гипотезы и калибруется исходами */
+  conviction: number;
+  why: string;
+  evs?: number;
+  direction?: string;
+  catsRu?: string[];
+}
+
+export interface PlannerDecisionRow {
+  authority: PlannerAuthority;
+  mode: PlannerMode;
+  provider: string | null;
+  model: string | null;
+  /** Сколько связок было предложено на выбор */
+  offered: number;
+  /** Страховочный потолок, а не план */
+  ceiling: number;
+  picks: PlannerPickRow[];
+  narrative: string;
+  /** Отбракованные решения модели: выдуманный код, повтор, выше потолка */
+  dropped: { code: string; reason: string }[];
+  latencyMs: number;
+  error: string | null;
+  createdAt?: string;
+}
+
+/** Исходы решений каждой из политик — сама модель стоит под тестом. */
+export interface PlannerArmStats {
+  n: number;
+  hits: number;
+  hitRate: number;
+  avgConviction: number;
+  expectancyBps: number;
+}
+
+export interface PlannerRecordRow {
+  ai: PlannerArmStats;
+  rule: PlannerArmStats;
+}
+
+export interface PlannerResponse {
+  success: boolean;
+  error?: string;
+  decision: PlannerDecisionRow | null;
+  history: { createdAt: string; mode: PlannerMode; offered: number; picked: number; summary: string }[];
+  /** Запасный порядок — это тоже правило, поэтому арми две: модель против детерминизма. */
+  record: PlannerRecordRow;
+  /** Сводка последних циклов: сколько решала модель и чем это кончалось. */
+  summary?: { cycles: number; aiCycles: number; fallbackCycles: number; emptyCycles: number };
+  policy: { authority: PlannerAuthority; ceiling: number };
+}
+
+/** GET/PUT /api/research/policy — кому принадлежит отбор и страховочный потолок. */
+export interface PolicyResponse {
+  success: boolean;
+  error?: string;
+  message?: string;
+  policy: { authority: PlannerAuthority; ceiling: number; updatedAt?: string };
+  limits?: { ceilingMin: number; ceilingMax: number };
 }
 
 /* ---------- AI Copilot ---------- */

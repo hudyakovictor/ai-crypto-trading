@@ -296,3 +296,21 @@ body::before {
 
 input[type="range"] { height: 22px; }
 select, input, textarea { color-scheme: dark; }
+
+/* ---------- Accessibility: уважаем prefers-reduced-motion ---------- */
+@media (prefers-reduced-motion: reduce) {
+  .anim-fade-up,
+  .anim-tick,
+  .anim-shake,
+  .pulse-dot,
+  .skeleton,
+  .stagger > * {
+    animation: none !important;
+  }
+  .hm-cell:hover {
+    transform: none;
+  }
+  .pressable:active {
+    transform: none;
+  }
+}

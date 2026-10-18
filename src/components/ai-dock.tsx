@@ -153,21 +153,31 @@ export function AiDockProvider({
     if (!draft) return;
     setApplying(true);
     try {
+      // Количество гипотез — не фильтр: планировщик цикла сам решает, сколько
+      // оформлять. Человек оставляет только вето (что вообще допустимо).
+      const veto = {
+        minEvs: draft.minEvs,
+        minCategories: draft.minCategories,
+        operators: draft.operators,
+        directions: draft.directions,
+        regimeLock: draft.regimeLock,
+        excludedCategories: draft.excludedCategories,
+      };
       await fetch("/api/research/filters", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(draft),
+        body: JSON.stringify(veto),
       });
-      toast("ok", "Параметры применены", `EVS ≥ ${draft.minEvs} · категорий ${draft.minCategories} · до ${draft.maxHypothesesPerCycle} гипотез за цикл`);
+      toast("ok", "Вето применено", `EVS ≥ ${draft.minEvs} · категорий ${draft.minCategories} · дальше решает планировщик`);
       if (alsoRunCycle) {
         const r = await postJson<{ result: { combinationsGenerated: number; hypothesesCreated: number; marketRegime: string } }>(
           "/api/research/cycle",
           { isManual: true }
         );
-        toast("ok", "Цикл выполнен на новых параметрах", `${r.result.combinationsGenerated} комбинаций · ${r.result.hypothesesCreated} гипотез в тест`);
+        toast("ok", "Цикл выполнен на новых параметрах", `${r.result.combinationsGenerated} связок в поиске · планировщик оформил ${r.result.hypothesesCreated} гипотез`);
         setMsgs((m) => [
           ...m,
-          { role: "me", text: `Применил: EVS=${draft.minEvs}, категорий=${draft.minCategories}, гипотез=${draft.maxHypothesesPerCycle} и запустил цикл` },
+          { role: "me", text: `Применил: EVS=${draft.minEvs}, категорий=${draft.minCategories} и запустил цикл` },
         ]);
       }
       await onApplied();
@@ -183,7 +193,6 @@ export function AiDockProvider({
     !!draft &&
     (rec.minEvs !== draft.minEvs ||
       rec.minCategories !== draft.minCategories ||
-      rec.maxHypothesesPerCycle !== draft.maxHypothesesPerCycle ||
       rec.excludedCategories.length !== draft.excludedCategories.length);
 
   return (
@@ -357,20 +366,12 @@ export function AiDockProvider({
                         ))}
                       </div>
                     </div>
-                    <div>
-                      <div className="mb-1 flex items-baseline justify-between">
-                        <label className="text-[12.5px] font-semibold text-text-2">Гипотез/цикл</label>
-                        <span className="num text-[13px] font-bold text-text-1">{draft.maxHypothesesPerCycle}</span>
-                      </div>
-                      <input
-                        type="range"
-                        min={5}
-                        max={100}
-                        step={5}
-                        value={draft.maxHypothesesPerCycle}
-                        onChange={(e) => setDraft({ ...draft, maxHypothesesPerCycle: Number(e.target.value) })}
-                        className="w-full accent-[#5b8dee]"
-                      />
+                    <div className="rounded-md border border-border bg-surface2 px-2.5 py-2">
+                      <label className="mb-0.5 block text-[12.5px] font-semibold text-text-2">Сколько оформлять</label>
+                      <p className="text-[12px] leading-snug text-text-3">
+                        решает планировщик цикла, не ползунок. Потолок {draft.maxHypothesesPerCycle} — страховка от
+                        потока записей; изменить — в настройках.
+                      </p>
                     </div>
                   </div>
 

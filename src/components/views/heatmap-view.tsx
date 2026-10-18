@@ -29,11 +29,11 @@ export function HeatmapView({ heatmap }: { heatmap: ApiState<HeatmapResponse> })
       />
 
       <Panel
-        title="Хитмап сигналов · полная матрица"
-        sub="интенсивность цвета = |normalized score|, оттенок = направление"
+        title="Хитмап сигналов · активы вселенной"
+        sub={`строки выбирает цикл · ${d?.assets.length ?? "—"} активов × 15 категорий · интенсивность цвета = |normalized score|`}
         actions={
           <div className="flex items-center gap-2">
-            {d && <Pill tone={d.isLive ? "bull" : "warn"} dot>{d.isLive ? "LIVE · OKX" : "SYNTH"}</Pill>}
+            {d && <Pill tone={d.isLive ? "bull" : "warn"} dot>{d.isLive ? "LIVE" : "SYNTH"}</Pill>}
             {d && <span className="num text-[13px] text-text-3">{d.latencyMs} ms</span>}
             <button
               onClick={() => void heatmap.refresh()}
@@ -68,7 +68,17 @@ export function HeatmapView({ heatmap }: { heatmap: ApiState<HeatmapResponse> })
                 <React.Fragment key={a.symbol}>
                   <div className="flex items-center gap-2.5 pr-2">
                     <div className="min-w-0">
-                      <div className="num text-[15px] font-semibold text-text-1">{a.symbol}</div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="num text-[15px] font-semibold text-text-1">{a.symbol.replace("-USDT", "")}</span>
+                        {a.role === "explore" && (
+                          <span className="num rounded-[4px] border border-dashed border-border-strong px-1 text-[13px] text-text-3">
+                            разв.
+                          </span>
+                        )}
+                        {a.dataLive === false && (
+                          <span className="size-[5px] rounded-full" style={{ background: "var(--amber)" }} />
+                        )}
+                      </div>
                       <div className="num text-[13px]" style={{ color: a.change24h >= 0 ? "var(--green)" : "var(--red)" }}>
                         ${fmtPrice(a.lastPrice)} · {fmtPct(a.change24h, 1)}
                       </div>

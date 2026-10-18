@@ -17,7 +17,6 @@ import { EdgeView } from "./views/edge-view";
 import { CopilotView } from "./views/copilot-view";
 import { SettingsDrawer } from "./settings-drawer";
 import { AiDockProvider } from "./ai-dock";
-import { TickerTape } from "./ticker-tape";
 
 const VIEW_TITLES: Record<ViewKey, string> = {
   overview: "Обзор",
@@ -28,17 +27,6 @@ const VIEW_TITLES: Record<ViewKey, string> = {
   walkforward: "Честный тест",
   edge: "Цель $15 000",
   copilot: "AI Копилот",
-};
-
-const VIEW_SUBS: Record<ViewKey, string> = {
-  overview: "главный экран: что торговать прямо сейчас и здоровье модели",
-  combinations: "100 связок сигналов за цикл и их оценка качества EVS",
-  heatmap: "направление давления по каждому активу и каждой из 15 категорий",
-  ledger: "каждый прогноз: вход, цель, инвалидация и фактический исход",
-  learning: "как модель перераспределяет доверие между 15 категориями",
-  walkforward: "проверка стратегии на данных, которых она не видела",
-  edge: "какие методики реально зарабатывают и сколько осталось до цели",
-  copilot: "7 изолированных AI-разборов поверх реальных данных базы",
 };
 
 /* ---------------- Toaster ---------------- */
@@ -134,7 +122,7 @@ function InitScreen({ onReady }: { onReady: () => void }) {
     setPhase("cycling");
     try {
       await postJson("/api/research/cycle", { isManual: true });
-      toast("ok", "Лаборатория инициализирована", "Первый цикл завершён: 100 комбинаций оценено.");
+      toast("ok", "Лаборатория инициализирована", "Первый цикл завершён: связки оценены, отбор решил планировщик.");
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Ошибка запуска цикла");
       setPhase("error");
@@ -157,7 +145,7 @@ function InitScreen({ onReady }: { onReady: () => void }) {
         <div>
           <h1 className="text-[15px] font-semibold text-text-1">OKX Quant Hypotheses Lab</h1>
           <p className="mt-1 text-[14px] leading-relaxed text-text-3">
-            Поднимаем исследовательскую инфраструктуру: сиды истории, веса обучения и первый цикл из 100 комбинаций.
+            Поднимаем исследовательскую инфраструктуру: сиды истории, веса обучения и первый цикл — вселенная, связки, отбор.
           </p>
         </div>
         {phase === "error" ? (
@@ -174,7 +162,7 @@ function InitScreen({ onReady }: { onReady: () => void }) {
           <div className="flex flex-col items-center gap-2">
             <span className="size-4 animate-spin rounded-full border-2 border-white/20 border-t-accent" />
             <span className="num text-[13px] text-text-3">
-              {phase === "seeding" ? "Восстановление истории гипотез…" : "Первый цикл: OKX → фичи → 100 комбо → прогнозы…"}
+              {phase === "seeding" ? "Восстановление истории гипотез…" : "Первый цикл: OKX → вселенная → связки → отбор планировщика…"}
             </span>
           </div>
         )}
@@ -194,11 +182,15 @@ export function AppShell() {
   const [clearing, setClearing] = useState(false);
   const [booted, setBooted] = useState(false);
   const [initChecked, setInitChecked] = useState(false);
+  /** Актив, по которому экран «Комбинации» считает связки. Якорь вселенной всегда валиден. */
+  const [asset, setAsset] = useState<string>("BTC-USDT");
   const needsInitRef = useRef(false);
 
   const status = useApi<import("@/lib/ui-types").StatusResponse>("/api/research/status", 20000);
   const heatmap = useApi<import("@/lib/ui-types").HeatmapResponse>(booted ? "/api/research/heatmap" : null, 90000);
-  const combos = useApi<import("@/lib/ui-types").CombinationsResponse>(booted ? "/api/research/combinations" : null);
+  const combos = useApi<import("@/lib/ui-types").CombinationsResponse>(
+    booted ? `/api/research/combinations?symbol=${encodeURIComponent(asset)}` : null
+  );
   const ledger = useApi<import("@/lib/ui-types").LedgerResponse>(booted ? "/api/research/ledger" : null, 30000);
   const learning = useApi<import("@/lib/ui-types").LearningResponse>(booted ? "/api/research/learning" : null, 45000);
   const walkforward = useApi<import("@/lib/ui-types").WalkForwardResponse>(booted ? "/api/research/walkforward" : null, 60000);
@@ -233,14 +225,20 @@ export function AppShell() {
   const runCycle = useCallback(async () => {
     if (running) return;
     setRunning(true);
-    toast("info", "Цикл запущен", "OKX → 15 категорий → 100 комбинаций → прогнозы");
+    toast("info", "Цикл запущен", "OKX → вселенная → связки → решение планировщика → прогнозы");
     try {
       const r = await postJson<{ result: CycleApiResult }>("/api/research/cycle", { isManual: true });
       const res = r.result;
+      const universeNote = res.universe?.length
+        ? `вселенная ${res.trackedCount ?? res.universe.length} пар`
+        : `${res.combinationsGenerated} связок`;
+      const d = res.planner;
       toast(
         "ok",
         `Цикл завершён · ${res.marketRegime.replace(/_/g, " ")}`,
-        `${res.combinationsGenerated} комбо · ${res.hypothesesCreated} гипотез · ${res.forecastsResolved} решено · ${res.latencyMs} ms`
+        d
+          ? `${universeNote} · ${d.mode === "ai" ? "решил ИИ" : d.mode === "fallback" ? "запасное правило" : "правило EVS"}: ${d.picks.length} из ${d.offered} кандидатов (потолок ${d.ceiling}) · ${res.latencyMs} ms`
+          : `${universeNote} · ${res.combinationsGenerated} связок · ${res.hypothesesCreated} гипотез · ${res.latencyMs} ms`
       );
     } catch (e) {
       toast("err", "Ошибка цикла", e instanceof Error ? e.message : "неизвестно");
@@ -322,11 +320,13 @@ export function AppShell() {
             ledger={ledger}
             learning={learning}
             walkforward={walkforward}
+            asset={asset}
+            onSelectAsset={setAsset}
             onOpenView={setView}
           />
         );
       case "combinations":
-        return <CombinationsView combos={combos} />;
+        return <CombinationsView combos={combos} asset={asset} onSelectAsset={setAsset} />;
       case "heatmap":
         return <HeatmapView heatmap={heatmap} />;
       case "ledger":
@@ -340,7 +340,7 @@ export function AppShell() {
       case "copilot":
         return <CopilotView ai={ai} />;
     }
-  }, [view, status, heatmap, combos, ledger, learning, walkforward, edge, ai, refreshAll]);
+  }, [view, status, heatmap, combos, ledger, learning, walkforward, edge, ai, asset, refreshAll]);
 
 
   if (initChecked && needsInitRef.current && !booted) {
@@ -364,21 +364,19 @@ export function AppShell() {
       <div className="pl-[72px]">
         <Topbar
           title={VIEW_TITLES[view]}
-          subtitle={VIEW_SUBS[view]}
           status={status.data}
           running={running}
           onRun={() => void runCycle()}
           onOpenSettings={() => setSettingsOpen(true)}
           onClearHistory={() => setClearOpen(true)}
           countdown={countdown}
+          showRun={view === "overview"}
         />
-        <TickerTape />
         <main key={view}>{viewEl}</main>
-        <footer className="flex h-8 items-center justify-between border-t border-border px-4 text-[13px] text-text-3">
-          <span>
-            Исследовательский инструмент. Не является финансовой рекомендацией. Криптоактивы сопряжены с риском полной потери капитала.
+        <footer className="flex h-7 items-center border-t border-border px-4">
+          <span className="text-[12.5px] text-text-3">
+            Исследовательский инструмент. Не является финансовой рекомендацией.
           </span>
-          <span className="num">OKX QUANT LAB · v3.0 · 15 категорий × 100 комбо / 15 мин</span>
         </footer>
       </div>
       <ShortcutsOverlay open={help} onClose={() => setHelp(false)} />

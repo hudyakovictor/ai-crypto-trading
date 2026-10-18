@@ -1,19 +1,30 @@
 import { NextResponse } from "next/server";
 import { okxClient } from "@/lib/okx/okx-client";
+import { passesFloor, quoteVolumeUsd } from "@/lib/quant/universe";
 
 export const dynamic = "force-dynamic";
 
-/** Живые котировки OKX для бегущей строки — лёгкий эндпоинт, poll каждые 10 секунд. */
+/**
+ * Исполнимый срез рынка: USDT-пары, прошедшие пол ликвидности.
+ * Диагностический эндпоинт — UI читает вселенную из /status и /heatmap.
+ * Отдаём только прошедшие пол (десятки пар вместо ~450 листингов), чтобы
+ * ответ оставался маленьким и означал то же, что и отбор цикла.
+ */
+const MAX_ROWS = 60;
+
 export async function GET() {
   const started = Date.now();
   try {
     const { tickers, isLive, latencyMs } = await okxClient.getTickers();
+    const executable = tickers.filter((t) => passesFloor(t)).slice(0, MAX_ROWS);
     return NextResponse.json({
       success: true,
       isLive,
       latencyMs: latencyMs || Date.now() - started,
       updatedAt: new Date().toISOString(),
-      tickers: tickers.map((t) => ({
+      listedCount: tickers.length,
+      executableCount: executable.length,
+      tickers: executable.map((t) => ({
         symbol: t.instId,
         base: t.instId.split("-")[0],
         last: t.last,
@@ -21,7 +32,8 @@ export async function GET() {
         high24h: t.high24h,
         low24h: t.low24h,
         vol24h: t.vol24h,
-        spreadBps: t.bidPx > 0 && t.askPx > 0 ? ((t.askPx - t.bidPx) / t.bidPx) * 10000 : 0,
+        quoteVolumeUsd: quoteVolumeUsd(t),
+        spreadBps: t.bidPx > 0 && t.askPx > 0 ? ((t.askPx - t.bidPx) / ((t.askPx + t.bidPx) / 2)) * 10000 : 0,
       })),
     });
   } catch (err) {

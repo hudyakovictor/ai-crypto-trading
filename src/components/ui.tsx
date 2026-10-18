@@ -146,7 +146,7 @@ export function Tip({
   return <div className={className}>{children}</div>;
 }
 
-/* eslint-disable-next-line @typescript-eslint/no-unused-vars */
+/* eslint-disable @typescript-eslint/no-unused-vars */
 function TipLegacyNeverUsed({
   label,
   children,
@@ -333,7 +333,16 @@ export function scoreTextTone(score: number): Tone {
   return "info";
 }
 
-/* ================= ViewGuide — «как пользоваться этим экраном» за 10 секунд ================= */
+/* ================= ViewGuide — сворачиваемая подсказка по экрану =================
+ * По умолчанию одна спокойная строка: акцент + AI-действие + кнопка «Как читать».
+ * Шаги раскрываются только по клику и не крадут первый экран. */
+
+const GUIDE_STORAGE = "ql.guide.open";
+
+function guideInitiallyOpen(): boolean {
+  if (typeof window === "undefined") return false;
+  return window.localStorage.getItem(GUIDE_STORAGE) === "1";
+}
 
 export function ViewGuide({
   accent,
@@ -348,35 +357,44 @@ export function ViewGuide({
   right?: React.ReactNode;
   className?: string;
 }) {
+  const [open, setOpen] = useState(guideInitiallyOpen);
+
+  const toggle = () => {
+    setOpen((o) => {
+      window.localStorage.setItem(GUIDE_STORAGE, o ? "0" : "1");
+      return !o;
+    });
+  };
+
   return (
-    <aside className={`grid gap-px overflow-hidden rounded-[10px] border border-border bg-border anim-fade-up lg:grid-cols-[240px_repeat(3,1fr)] ${className}`}>
-      <div className="flex items-center gap-3 bg-surface px-4 py-3.5">
-        <span
-          className="num flex size-9 shrink-0 items-center justify-center rounded-[9px] text-[15px] font-bold"
-          style={{ background: "rgba(91,141,238,0.14)", color: "var(--accent)", border: "1px solid rgba(91,141,238,0.35)" }}
+    <aside className={`rounded-[10px] border border-border bg-surface anim-fade-up ${className}`}>
+      <div className="flex h-[42px] items-center gap-3 px-4">
+        <span className="text-[13.5px] font-semibold tracking-wide text-text-2">{accent}</span>
+        <button
+          onClick={toggle}
+          aria-expanded={open}
+          className="hoverable pressable rounded-md border border-border-strong bg-surface2 px-2.5 py-1 text-[13px] font-medium text-text-3 hover:text-text-1"
         >
-          ?
-        </span>
-        <div>
-          <div className="text-[14px] font-bold text-text-1">{accent}</div>
-          <div className="text-[13px] text-text-3">как читать этот экран</div>
-        </div>
+          {open ? "Скрыть" : "Как читать"}
+        </button>
+        <div className="ml-auto flex shrink-0 items-center gap-2">{right}</div>
       </div>
-      {steps.map((s, i) => (
-        <div key={i} className="flex items-start gap-3 bg-surface px-4 py-3.5">
-          <span className="num mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md bg-surface3 text-[13px] font-bold text-accent">
-            {i + 1}
-          </span>
-          <div className="min-w-0">
-            <div className="text-[13.5px] font-semibold leading-snug text-text-1">{s.t}</div>
-            <div className="mt-0.5 text-[13px] leading-snug text-text-3">{s.d}</div>
-          </div>
-        </div>
-      ))}
-      {(note || right) && (
-        <div className="col-span-full flex items-center justify-between gap-3 bg-surface px-4 py-2.5">
-          {note && <p className="text-[13px] leading-snug text-text-3">{note}</p>}
-          {right}
+      {open && (
+        <div className="grid gap-x-5 gap-y-3 border-t border-border px-4 py-3.5 md:grid-cols-3">
+          {steps.map((s, i) => (
+            <div key={i} className="flex items-start gap-2.5">
+              <span className="num mt-px flex size-5 shrink-0 items-center justify-center rounded-[6px] bg-surface3 text-[12.5px] font-bold text-accent">
+                {i + 1}
+              </span>
+              <div className="min-w-0">
+                <div className="text-[13px] font-semibold leading-snug text-text-1">{s.t}</div>
+                <div className="mt-0.5 text-[13px] leading-snug text-text-3">{s.d}</div>
+              </div>
+            </div>
+          ))}
+          {note && (
+            <p className="text-[13px] leading-snug text-text-3 md:col-span-3 md:border-t md:border-border md:pt-3">{note}</p>
+          )}
         </div>
       )}
     </aside>
