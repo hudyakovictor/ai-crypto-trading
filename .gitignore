@@ -45,3 +45,7 @@ next-env.d.ts
 # archives
 *.zip
 node_modules
+
+# browser verification screenshots (temp artifacts, not part of the repo)
+/screenshot-*.png
+/verify-*.png
