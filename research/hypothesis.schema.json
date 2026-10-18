@@ -1,0 +1,301 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local/research/hypothesis.schema.json",
+  "title": "Карточка гипотезы крипто-трейдинг исследования",
+  "description": "Одна запись на одну версию гипотезы. Файл research/hypotheses.jsonl, одна строка = один объект. Правка признаков, горизонта или инструмента порождает новую версию, а не переписывание существующей.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id", "version", "title", "lifecycle", "mechanism", "market", "horizon",
+    "signal", "availability", "ai_role", "baseline", "costs", "testability",
+    "statistics", "decision", "evidence", "provenance"
+  ],
+  "properties": {
+    "id": { "type": "string", "pattern": "^H[0-9]{3}$", "description": "Стабильный идентификатор, не меняется между итерациями." },
+    "version": { "type": "integer", "minimum": 1, "description": "1 — исходная формулировка; каждая содержательная правка увеличивает версию." },
+    "title": { "type": "string", "maxLength": 120 },
+    "lifecycle": { "enum": ["карточка", "пре-зарегистрирована", "тестируется", "жива", "отвергнута", "нет_данных", "неприменимо_легально"] },
+    "mechanism": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["actor", "constraint", "observable", "opportunity", "action", "decay"],
+      "properties": {
+        "actor": { "type": "string", "description": "Кто на рынке создаёт эффект своим действием или ограничением." },
+        "constraint": { "type": "string", "description": "Какое ограничение или обязательство этого участника." },
+        "observable": { "type": "string", "description": "Как эффект виден в доступных данных." },
+        "opportunity": { "type": "string", "description": "Какая возможность из этого следует." },
+        "action": { "type": "string", "description": "Какое торговое действие её реализует." },
+        "decay": { "type": "string", "description": "Почему и как возможность исчезает." },
+        "who_pays": { "type": "string", "description": "Кто экономически оплачивает результат." },
+        "risk_premium_or_alpha": { "enum": ["премия за риск", "структурное ограничение", "арбитражная ошибка", "неизвестно"] },
+        "alternative_explanations": { "type": "array", "items": { "type": "string" }, "description": "Минимум одно альтернативное объяснение наблюдения." },
+        "crowding_indicator": { "type": "string", "description": "По чему видно, что возможность уже занята или исчезает." },
+        "half_life": { "type": "string", "description": "Оценка времени, пока механизм не будет исчерпан, и основание оценки." },
+        "legal_or_ethical_block": { "type": "string", "description": "Если механизм требует манипуляции, инсайда или особого доступа — указать и закрыть." }
+      }
+    },
+    "market": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["venue_class", "instrument"],
+      "properties": {
+        "venue_class": { "enum": ["CEX спот", "CEX бессрочные", "CEX срочные", "DEX", "опционы", "межплощадочное", "вне биржи"] },
+        "instrument": { "type": "string" },
+        "assets": { "type": "array", "items": { "type": "string" }, "description": "Инструменты, где механизм заявлен; перенос на весь рынок требует проверки." },
+        "data_vendor_class": { "type": "string", "description": "Какие данные нужны и доступны ли они публично." }
+      }
+    },
+    "horizon": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bar_minutes", "target_move_bps"],
+      "properties": {
+        "bar_minutes": { "type": "number", "minimum": 0, "description": "Длительность одного наблюдения сигнала." },
+        "holding_minutes": { "type": "number", "minimum": 0, "description": "Плановое удержание позиции." },
+        "target_move_bps": { "type": "number", "description": "Какой ход считается реализацией сигнала." },
+        "decision_latency_ms": { "type": "number", "description": "Время от события до возможной отправки заявки." }
+      }
+    },
+    "signal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inputs", "rule", "direction"],
+      "properties": {
+        "inputs": { "type": "array", "items": { "type": "string" }, "description": "Поля данных сигнала, без будущего." },
+        "rule": { "type": "string", "description": "Формальное условие срабатывания: признак, порог, логика объединения." },
+        "direction": { "enum": ["UP", "DOWN", "NEUTRAL", "BOTH"] },
+        "entry": { "type": "string" },
+        "exit": { "type": "string" },
+        "invalidation": { "type": "string", "description": "Условие недействительности сигнала до выхода." },
+        "parameters": { "type": "object", "additionalProperties": { "type": ["number", "string", "boolean"] } }
+      }
+    },
+    "availability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["event_time", "earliest_actionable"],
+      "properties": {
+        "event_time": { "type": "string", "description": "Когда событие происходит на бирже." },
+        "publish_time": { "type": "string", "description": "Когда становится доступно публично." },
+        "ingest_time": { "type": "string", "description": "Когда доходит до системы." },
+        "earliest_actionable": { "type": "string", "description": "Самый ранний момент отправки заявки." },
+        "revision_risk": { "type": "string", "description": "Могут ли данные пересматриваться задним числом и как это учитывается." },
+        "pit_source": { "type": "string", "description": "Откуда берётся point-in-time версия; если её нет — сказать прямо." }
+      }
+    },
+    "ai_role": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["function", "justification"],
+      "properties": {
+        "function": { "enum": ["извлечение событий из текста", "оценка вероятности", "обнаружение режима", "объединение сигналов", "выбор действия", "настройка исполнения", "отказ от действия", "иное"] },
+        "justification": { "type": "string", "description": "Почему это нельзя дешевле получить простым правилом." },
+        "model_class": { "type": "string" },
+        "reproducibility": { "type": "string", "description": "Версия модели, фиксация промпта, снимок входов; чем заменяется при утрате доступа к версии." },
+        "leakage_guard": { "type": "string", "description": "Как исключено календарное знание модели и данные, недоступные на момент решения." },
+        "injection_guard": { "type": "string", "description": "Как внешний текст не может изменить инструкции модели." },
+        "cost_per_decision": { "type": "string" },
+        "latency_per_decision_ms": { "type": "number" }
+      }
+    },
+    "baseline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["simple_algorithm", "comparison_ladder"],
+      "properties": {
+        "simple_algorithm": { "type": "string", "description": "Минимальный конкурент: фиксированное правило, линейная или логистическая модель." },
+        "comparison_ladder": { "type": "array", "items": { "type": "string" }, "description": "Порядок сравнения: без торговли, ориентир рынка, простое правило, правило с признаками, вариант с AI." },
+        "expected_uplift": { "type": "string", "description": "Какая метрика и на сколько должна улучшиться, чтобы сложность оправдалась." },
+        "base_rate": { "type": "string", "description": "Базовый уровень сравнения, например доля успешных исходов в сопоставимом стенде." }
+      }
+    },
+    "costs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "round_trip_bps"],
+      "properties": {
+        "fee_bps": { "type": "number" },
+        "spread_bps": { "type": "number" },
+        "slippage_bps": { "type": "number" },
+        "funding_bps": { "type": "number" },
+        "round_trip_bps": { "type": "number", "description": "Сумма без двойного счёта одной статьи." },
+        "model": { "type": "string", "description": "Откуда числа: документация площадки, измерение или допущение." },
+        "adverse_case_bps": { "type": "number", "description": "Неблагоприятный сценарий издержек." },
+        "capacity_note": { "type": "string", "description": "При каком размере позиция модель издержек ещё правдоподобна." }
+      }
+    },
+    "testability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tier", "why"],
+      "properties": {
+        "tier": { "enum": ["T0", "T1", "T2", "T3"], "description": "T0 — проверяемо существующим стендом без доработок; T1 — нужен новый датасет или другой горизонт при той же инфраструктуре; T2 — нужна внешняя инфраструктура, иная задержка или особый доступ; T3 — проверяемой сделки сейчас нет." },
+        "why": { "type": "string" },
+        "harness": { "type": "string", "description": "Какой стенд выполняет проверку и на каких данных." },
+        "missing_data": { "type": "array", "items": { "type": "string" } },
+        "required_build": { "type": "string", "description": "Что построить для T1/T2 и какой это стоит бюджет." }
+      }
+    },
+    "statistics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["n_planned", "min_detectable_effect"],
+      "properties": {
+        "n_planned": { "type": "integer", "minimum": 0, "description": "Число независимых событий, которое реально можно накопить." },
+        "min_detectable_effect": { "type": "string", "description": "Наименьший эффект, который эта выборка способна обнаружить." },
+        "power_note": { "type": "string", "description": "Что можно и чего нельзя утверждать при таком объёме." },
+        "test_method": { "type": "string", "description": "Схема проверки с обоснованием: purged CV с embargo, walk-forward, блочный бутстрэп." },
+        "multiplicity_budget": { "type": "integer", "minimum": 1, "description": "Сколько вариантов допустимо перебрать до фиксации результата." },
+        "correction": { "type": "string", "description": "Как учитывается перебор: DSR, PBO, Reality Check или SPA, ограничение числа попыток." },
+        "concentration_risk": { "type": "string", "description": "Не держится ли результат на единицах сделок, монет или периодов." }
+      }
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["success_criterion", "kill_criterion", "cheapest_experiment"],
+      "properties": {
+        "success_criterion": { "type": "string", "description": "Что именно наблюдаться и относительно чего оценивается." },
+        "kill_criterion": { "type": "string", "description": "Наблюдение, после которого гипотеза отвергается. Не «низкая доходность»." },
+        "cheapest_experiment": { "type": "string", "description": "Самый дешёвый способ получить решающее наблюдение." },
+        "expected_cost": { "type": "string" },
+        "expected_runtime": { "type": "string" },
+        "stop_rule": { "type": "string", "description": "Когда эксперимент прекращается независимо от результата." },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["supports", "contradicts", "independent_confirmations"],
+      "properties": {
+        "supports": { "type": "array", "items": { "type": "string" }, "description": "ID подтверждающих источников." },
+        "contradicts": { "type": "array", "items": { "type": "string" }, "description": "ID источников и наблюдений против; пустой список объясняется." },
+        "independent_confirmations": { "type": "integer", "minimum": 0, "description": "Подтверждения из разных групп происхождения." },
+        "independent_objections": { "type": "integer", "minimum": 0 },
+        "open_questions": { "type": "array", "items": { "type": "string" } },
+        "score": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0, "maximum": 5 }, "description": "Оценки 0–5: механизм, независимость подтверждений, качество данных, реалистичность исполнения, устойчивость к издержкам, стоимость проверки." },
+        "score_rationale": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Обоснование каждой оценки и уровень уверенности в ней." }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["created_in_iteration", "created_at"],
+      "properties": {
+        "created_in_iteration": { "type": "integer", "minimum": 1, "maximum": 3 },
+        "created_at": { "type": "string", "format": "date" },
+        "updated_at": { "type": "string", "format": "date" },
+        "changed_from_version": { "type": "integer", "minimum": 1, "description": "Какая версия изменена и чем именно." },
+        "real_capital_delta": { "type": "string", "description": "Что изменится при переходе от бумажного исполнения к реальному капиталу." }
+      }
+    }
+  },
+  "examples": [
+    {
+      "id": "H014",
+      "version": 1,
+      "title": "Возврат цены после каскада принудительных закрытий",
+      "lifecycle": "карточка",
+      "mechanism": {
+        "actor": "участники с плечом, принудительно закрываемые биржей",
+        "constraint": "закрытие по маржин-коллу не является добровольным ценовым решением",
+        "observable": "сумма ликвидаций и смещение цены за окно больше обычного",
+        "opportunity": "возврат части смещения после исчерпания каскада",
+        "action": "вход против каскада по признаку его завершения, выход по истечении окна",
+        "decay": "каски перекрываются более быстрыми исполнителями; при сжатии спреда возможность исчезает",
+        "who_pays": "принудительно закрываемые позиции и те, кто входит по каскаду",
+        "risk_premium_or_alpha": "структурное ограничение",
+        "alternative_explanations": ["общее рыночное движение в те же минуты"],
+        "crowding_indicator": "сужение среднего восстановления цены после каскада",
+        "half_life": "оценка по скорости сокращения эффекта в опубликованных разборах"
+      },
+      "market": {
+        "venue_class": "CEX бессрочные",
+        "instrument": "USDT-бессрочный",
+        "assets": ["BTC-USDT-SWAP", "ETH-USDT-SWAP"],
+        "data_vendor_class": "публичный поток ликвидаций и стакана"
+      },
+      "horizon": { "bar_minutes": 5, "holding_minutes": 30, "target_move_bps": 60, "decision_latency_ms": 1500 },
+      "signal": {
+        "inputs": ["лента ликвидаций", "цена", "объём", "фандлинг"],
+        "rule": "сумма ликвидаций за окно превышает квантиль 0.99 своей истории И смещение цены больше 3 медианных шагов",
+        "direction": "BOTH",
+        "entry": "limit против смещения после признака завершения каскада",
+        "exit": "по истечении окна или при возврате смещения",
+        "invalidation": "продолжение каскада после входа",
+        "parameters": { "window_sec": 60, "quantile": 0.99 }
+      },
+      "availability": {
+        "event_time": "момент исполнения ликвидационной заявки на бирже",
+        "publish_time": "не позднее 200 мс после события по публичному потоку",
+        "ingest_time": "задержка приёма плюс обработка, измеряются отдельно",
+        "earliest_actionable": "после получения последнего события окна",
+        "revision_risk": "лента не пересматривается; стакан может быть неполным при сбое",
+        "pit_source": "собственный журнал сырых сообщений с метками приёма"
+      },
+      "ai_role": {
+        "function": "объединение сигналов",
+        "justification": "порог по квантилям и состояние рынка меняются; правило с фиксированной константой деградирует",
+        "model_class": "градиентный бустинг на табличных признаках, не LLM",
+        "reproducibility": "фиксация версии библиотек, семян и снимка признаков",
+        "leakage_guard": "квантили считаются по расширяющемуся окну без доступа к будущему",
+        "injection_guard": "неприменимо, внешних текстов нет",
+        "cost_per_decision": "доли секунды CPU",
+        "latency_per_decision_ms": 40
+      },
+      "baseline": {
+        "simple_algorithm": "фиксированный порог по сумме ликвидаций и вход по рынку",
+        "comparison_ladder": ["без торговли", "покупка и удержание корзины", "фиксированный порог", "порог по квантилям", "модель объединения"],
+        "expected_uplift": "чистый результат за сделку после издержек выше простого порога минимум на 5 bps",
+        "base_rate": "доля успешных исходов сопоставимого стенда"
+      },
+      "costs": {
+        "fee_bps": 8, "spread_bps": 4, "slippage_bps": 10, "funding_bps": 1,
+        "round_trip_bps": 46,
+        "model": "комиссия из тарифов площадки, спред и проскальзывание — из измерений в моменты каскадов",
+        "adverse_case_bps": 90,
+        "capacity_note": "модель правдоподобна до размера, составляющего малую долю видимого стакана в момент каскада"
+      },
+      "testability": {
+        "tier": "T1",
+        "why": "существующий стенд работает на 15-минутных барах; здесь нужны лента ликвидаций и пятиминутные интервалы",
+        "harness": "стенд лаборатории с новым источником данных и изменённым баром",
+        "missing_data": ["историческая лента ликвидаций с метками приёма"],
+        "required_build": "приём и хранение потока ликвидаций, пересборка признаков point-in-time"
+      },
+      "statistics": {
+        "n_planned": 120,
+        "min_detectable_effect": "отличимое улучшение доли успешных исходов примерно на 8 процентных пунктов",
+        "power_note": "при меньшем эффекте различие с базой не устанавливается",
+        "test_method": "walk-forward с purge и embargo по длине удержания",
+        "multiplicity_budget": 5,
+        "correction": "DSR по числу попыток из журнала; контроль случайных признаков",
+        "concentration_risk": "эффект может давать несколько крупных каскадов"
+      },
+      "decision": {
+        "success_criterion": "чистый результат за сделку положителен в независимом периоде и превосходит простой порог",
+        "kill_criterion": "в контроле со случайно перемешанной лентой ликвидаций результат не отличается от боевого запуска",
+        "cheapest_experiment": "проверка на сохранённом потоке ликвидаций одного инструмента без новых сделок",
+        "expected_cost": "несколько часов вычислений и одна неделя накопления данных",
+        "expected_runtime": "две недели наблюдений при текущей частоте каскадов",
+        "stop_rule": "превышение плана проскальзывания в два раза или сбой ленты более чем на 5 процентов времени",
+        "confidence": 0.4
+      },
+      "evidence": {
+        "supports": [],
+        "contradicts": [],
+        "independent_confirmations": 0,
+        "independent_objections": 0,
+        "open_questions": ["Является ли возврат следствием ликвидаций или общего движения?"],
+        "score": { "механизм": 4, "независимость_подтверждений": 1, "качество_данных": 2, "исполнение": 2, "устойчивость_к_издержкам": 2, "стоимость_проверки": 3 },
+        "score_rationale": { "независимость_подтверждений": "подтверждений из разных групп происхождения пока собрано ноль — это блокер для второй итерации" }
+      },
+      "provenance": {
+        "created_in_iteration": 1,
+        "created_at": "2026-10-19",
+        "real_capital_delta": "при реальном капитале добавляются лимиты частоты заявок, маржинальная нагрузка в каскад и отказоустойчивость соединения"
+      }
+    }
+  ]
+}
