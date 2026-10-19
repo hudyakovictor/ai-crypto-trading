@@ -1,0 +1,29 @@
+{
+  "iteration": 1,
+  "last_updated": "2026-10-18T00:00:00Z",
+  "sources_unique": 150,
+  "sources_by_tier": {
+    "primary": 98,
+    "independent_check": 8,
+    "official_docs": 4,
+    "repo_or_dataset": 5,
+    "secondary": 31,
+    "vendor_claim": 4
+  },
+  "sources_deep_read": 35,
+  "protocol_anchors_in_references_txt": 21,
+  "claims_registered": 30,
+  "signals_reported": 15,
+  "open_questions": [
+    "Переносится ли выигрыш информационной асимметрии [S120] на 15-мин крипто-прогноз? Проверка: shadow-ансамбль через OPE.",
+    "Каков реальный DSR лучших связок лаборатории при кумулятивном счётчике trials?",
+    "Заполнение regimePerformanceJson: режимные постериоры против глобальных весов — A/B через shadow.",
+    "Сколько разрешённых исходов нужно для первой дистилляции стат-ученика (порог ≥500 предложен, не обоснован)?"
+  ],
+  "queue_unavailable": [],
+  "hypotheses": [],
+  "candidates_passed": 0,
+  "holdout_status": "not_created",
+  "code_changed": false,
+  "next_action": "Итерация 2 (независимая сессия, ≥24ч): атака 15 сигналов, заполнение hypotheses.jsonl (12-20 карточек) и contradictions.tsv. Стоимость: одна исследовательская сессия без изменения кода."
+}
