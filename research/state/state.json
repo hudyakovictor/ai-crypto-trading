@@ -1,29 +1,105 @@
 {
-  "iteration": 1,
-  "last_updated": "2026-10-18T00:00:00Z",
-  "sources_unique": 150,
+  "iteration": 2,
+  "last_updated": "2026-10-19T00:00:00Z",
+  "sources_unique": 176,
+  "sources_new_in_iteration2": 26,
   "sources_by_tier": {
-    "primary": 98,
-    "independent_check": 8,
-    "official_docs": 4,
+    "primary": 115,
+    "independent_check": 10,
+    "official_docs": 5,
     "repo_or_dataset": 5,
-    "secondary": 31,
-    "vendor_claim": 4
+    "secondary": 36,
+    "vendor_claim": 5
   },
-  "sources_deep_read": 35,
+  "sources_deep_read": 40,
   "protocol_anchors_in_references_txt": 21,
-  "claims_registered": 30,
+  "claims_registered": 35,
   "signals_reported": 15,
+  "signals_survived": 14,
+  "signals_weakened": 1,
+  "contradictions": 5,
+  "contradictions_open": 0,
+  "rejected_ideas": 10,
+  "hypotheses": [
+    {
+      "id": "H001",
+      "version": 1,
+      "lifecycle": "пре-зарегистрирована",
+      "protocol": "P1"
+    },
+    {
+      "id": "H002",
+      "version": 1,
+      "lifecycle": "пре-зарегистрирована",
+      "protocol": "P2"
+    },
+    {
+      "id": "H003",
+      "version": 1,
+      "lifecycle": "пре-зарегистрирована"
+    },
+    {
+      "id": "H004",
+      "version": 1,
+      "lifecycle": "пре-зарегистрирована",
+      "protocol": "P4"
+    },
+    {
+      "id": "H005",
+      "version": 1,
+      "lifecycle": "пре-зарегистрирована",
+      "protocol": "P3"
+    },
+    {
+      "id": "H006",
+      "version": 1,
+      "lifecycle": "пре-зарегистрирована"
+    },
+    {
+      "id": "H007",
+      "version": 1,
+      "lifecycle": "пре-зарегистрирована"
+    },
+    {
+      "id": "H008",
+      "version": 1,
+      "lifecycle": "карточка"
+    },
+    {
+      "id": "H009",
+      "version": 1,
+      "lifecycle": "карточка"
+    },
+    {
+      "id": "H010",
+      "version": 1,
+      "lifecycle": "карточка"
+    },
+    {
+      "id": "H011",
+      "version": 1,
+      "lifecycle": "карточка"
+    },
+    {
+      "id": "H012",
+      "version": 1,
+      "lifecycle": "карточка"
+    }
+  ],
+  "candidates_passed": 7,
+  "holdout_status": "not_created",
   "open_questions": [
-    "Переносится ли выигрыш информационной асимметрии [S120] на 15-мин крипто-прогноз? Проверка: shadow-ансамбль через OPE.",
-    "Каков реальный DSR лучших связок лаборатории при кумулятивном счётчике trials?",
-    "Заполнение regimePerformanceJson: режимные постериоры против глобальных весов — A/B через shadow.",
-    "Сколько разрешённых исходов нужно для первой дистилляции стат-ученика (порог ≥500 предложен, не обоснован)?"
+    "Переносимость H001 (информационная асимметрия) на 15m крипто — проверяется P1",
+    "Достаточна ли стохастичность softmax T=8 для ESS≥20 в H003",
+    "Фактический net funding топ-активов OKX 2025-2026 для H008",
+    "Скорость накопления n≥500 для H009 при текущей активности планировщика"
   ],
   "queue_unavailable": [],
-  "hypotheses": [],
-  "candidates_passed": 0,
-  "holdout_status": "not_created",
-  "code_changed": false,
-  "next_action": "Итерация 2 (независимая сессия, ≥24ч): атака 15 сигналов, заполнение hypotheses.jsonl (12-20 карточек) и contradictions.tsv. Стоимость: одна исследовательская сессия без изменения кода."
+  "code_changed": "ожидается: внедрение H002,H004,H003,H005,H001",
+  "protocol_violations": [
+    "Итерация 2 в одной сессии с итерацией 1 без суточной паузы — по команде пользователя",
+    "Новых источников 26 при пороге ≥30",
+    "map.md не создан (избыточен при наличии отчёта и hypotheses.jsonl)"
+  ],
+  "next_action": "Внедрение T0-механизмов в код: calibrator.ts, deflated-stats.ts, shadow-book.ts, regime posteriors, ensemble.ts; затем накопление журнала и итерация 3 по протоколам P1-P4."
 }
