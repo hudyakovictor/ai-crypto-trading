@@ -22,6 +22,8 @@ interface AutopilotState {
   lastCycleAt: string | null;
   lastCycleSummary: string | null;
   lastError: string | null;
+  /** Курсор дедупликации: прогнозы с id ≤ уже переобучены автопилотом. */
+  lastRetrainedForecastId: number;
 }
 
 const g = globalThis as typeof globalThis & { __quantAutopilot?: AutopilotState };
@@ -34,6 +36,7 @@ function state(): AutopilotState {
       intervalSec: 60,
       cyclesCompleted: 0,
       retrainsCompleted: 0,
+      lastRetrainedForecastId: 0,
       lastCycleAt: null,
       lastCycleSummary: null,
       lastError: null,
@@ -62,7 +65,10 @@ async function tick() {
   s.lastCycleSummary = result.summary;
   s.lastError = null;
 
-  // Полное переобучение на всей истории после каждого цикла
+  // Переобучение на НОВЫХ исходах после каждого цикла.
+  // Две защиты от двойного счёта (важны после λ-decay и режимных апостериоров):
+  //  — курсор lastRetrainedForecastId: каждый прогноз автопилот обучает один раз;
+  //  — исходы последних 2 минут пропущены: их уже обучил сам цикл планировщика.
   try {
     const resolved = await db
       .select()
@@ -71,17 +77,35 @@ async function tick() {
       .orderBy(asc(forecasts.createdAt));
     const hyps = await db.select().from(hypotheses);
     const hypMap = new Map(hyps.map((h) => [h.id, h]));
-    const events = resolved
+    const cycleCutoff = Date.now() - 2 * 60 * 1000;
+    const fresh = resolved.filter(
+      (f) => f.id > s.lastRetrainedForecastId && (!f.resolvedAt || f.resolvedAt.getTime() < cycleCutoff)
+    );
+    const events = fresh
       .filter((f) => f.hypothesisId)
-      .map((f) => ({
-        categories: (hypMap.get(f.hypothesisId!)?.categoriesJson as string[]) ?? [],
-        outcome: (f.outcome ?? "miss") as "hit" | "miss" | "ambiguous" | "expired",
-        realizedReturn: f.realizedReturnNet ?? 0,
-      }))
+      .map((f) => {
+        const h = hypMap.get(f.hypothesisId!);
+        const plannerMeta = (h?.scoreComponentsJson as {
+          planner?: { conviction?: number; regimeAtCreation?: string };
+        } | null)?.planner;
+        return {
+          categories: (h?.categoriesJson as string[]) ?? [],
+          outcome: (f.outcome ?? "miss") as "hit" | "miss" | "ambiguous" | "expired",
+          realizedReturn: f.realizedReturnNet ?? 0,
+          regime: plannerMeta?.regimeAtCreation,
+          statedProb: plannerMeta?.conviction ?? (h ? 1 - (h.uncertainty ?? 0.35) : undefined),
+        };
+      })
       .filter((e) => e.categories.length > 0);
     if (events.length > 0) {
       await learningLoop.updateFromOutcomes(events);
       s.retrainsCompleted++;
+    }
+    if (resolved.length > 0) {
+      s.lastRetrainedForecastId = Math.max(
+        s.lastRetrainedForecastId,
+        ...resolved.map((f) => f.id).filter((id) => typeof id === "number")
+      );
     }
   } catch (err) {
     s.lastError = err instanceof Error ? err.message : "retrain failed";

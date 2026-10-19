@@ -12,6 +12,9 @@ import type {
   PlannerRecordRow,
 } from "../ui-types";
 import type { SelectionPolicyState } from "./policy";
+import { getCalibrationState } from "./calibrator";
+import { computeDeflatedGate } from "./deflated-stats";
+import { ensembleSummary, type EnsembleVote } from "../ai/ensemble";
 
 /**
  * ПЛАНИРОВЩИК ЦИКЛА — здесь решается, сколько гипотез оформлять и какие.
@@ -101,6 +104,19 @@ export interface ModelFacts {
   brier: number;
   expectancyBps: number;
   pending: number;
+  /** ВНЕШНИЙ Brier от заявленной conviction (H002); null пока n<30 held-out. */
+  brierExternal: number | null;
+  /** Wilson LB hit-rate: нижняя граница, а не точечная оценка. */
+  wilsonLb: number;
+  /** ECE сырой и откалиброванной вероятности на held-out (P2). */
+  eceRaw: number | null;
+  eceCal: number | null;
+  calibrationN: number;
+  calibrationReady: boolean;
+  /** Гейт DSR (P4): trials, DSR, вердикт; gate_silent при n<30. */
+  trials: number;
+  dsr: number;
+  gateVerdict: "gate_silent" | "pass" | "fail";
 }
 
 export interface PlanInput {
@@ -113,6 +129,8 @@ export interface PlanInput {
   universeNote: string;
   /** Общий бюджет времени на цепочку провайдеров: после него — fallback */
   deadlineMs?: number;
+  /** Голоса ансамбля асимметричных срезов (H001): code → {p, spread, n}. */
+  ensemble?: Map<string, EnsembleVote>;
 }
 
 const catRu = (c: string) => CATEGORY_DEFINITIONS[c as CategoryKey]?.labelRu ?? c.replace(/_/g, " ");
@@ -245,12 +263,29 @@ export async function loadModelFacts(pendingCount: number): Promise<ModelFacts> 
   } catch {
     /* пустая база — факты нулевые, модель обязана сама учесть это в решении */
   }
+
+  // Внешние факты: калибратор (H002) и гейт DSR (H004) — считаются параллельно,
+  // каждый fail-tolerant: ошибка не обнуляет остальное.
+  const [cal, gate] = await Promise.all([
+    getCalibrationState().catch(() => null),
+    computeDeflatedGate().catch(() => null),
+  ]);
+
   return {
     resolved,
     hitRate: resolved ? (hits / resolved) * 100 : 0,
     brier,
     expectancyBps: resolved ? (ret / resolved) * 100 : 0,
     pending: pendingCount,
+    brierExternal: cal?.brierRaw ?? null,
+    wilsonLb: gate?.wilsonLb ?? 0,
+    eceRaw: cal?.eceRaw ?? null,
+    eceCal: cal?.eceCal ?? null,
+    calibrationN: cal?.n ?? 0,
+    calibrationReady: cal?.ready ?? false,
+    trials: gate?.trials ?? 0,
+    dsr: gate?.dsr ?? 0,
+    gateVerdict: gate?.verdict ?? "gate_silent",
   };
 }
 
@@ -471,11 +506,14 @@ function renderPrior(prior: SignatureRecord | null, baseHitRate: number): string
 }
 
 /** Одна строка кандидата — уложиться в пару десятков токенов, latency важнее красок. */
-function renderCandidate(c: PlannerCandidate, f: ModelFacts): string {
+function renderCandidate(c: PlannerCandidate, f: ModelFacts, ens?: Map<string, EnsembleVote>): string {
   const move = c.move
     ? `ход15м медиана ${c.move.medAbsBps}bps, бара ${OUTCOME_BAR_BPS}bps достигает ${c.move.reachPct}% шагов (n=${c.move.n})`
     : "ход актива неизвестен (свечей мало)";
-  return `${c.code} · ${c.asset} · EVS ${c.evs} · ${c.direction} · ${c.catsShort.join("+")} · ${c.regime} · n=${c.sampleSize} · согл${c.breakdown.crossAgreement}/20 · ${move} · ${renderPrior(c.prior, f.hitRate)}`;
+  const vote = ens?.get(c.code);
+  // «ансP» — независимая оценка ансамбля срезов: расхождение с твоей intuition — сигнал, а не шум.
+  const ensPart = vote ? ` · ансP ${vote.p.toFixed(2)}±${vote.spread.toFixed(2)}(${vote.n})` : "";
+  return `${c.code} · ${c.asset} · EVS ${c.evs} · ${c.direction} · ${c.catsShort.join("+")} · ${c.regime} · n=${c.sampleSize} · согл${c.breakdown.crossAgreement}/20 · ${move}${ensPart} · ${renderPrior(c.prior, f.hitRate)}`;
 }
 
 /**
@@ -499,10 +537,26 @@ function renderPlanPrompt(input: PlanInput): string {
     `Потолок ${input.policy.ceiling} — страховка от потока записей, а не план. Ориентируйся на качество, не на него.`
   );
 
+  const gateNote =
+    f.gateVerdict === "pass"
+      ? `гейт DSR пройден (${f.dsr.toFixed(2)}≥0.95)`
+      : f.gateVerdict === "fail"
+        ? `гейт DSR НЕ пройден (${f.dsr.toFixed(2)}<0.95): наблюдаемый edge статистически неотличим от лучшего из ${f.trials} испытаний — бери консервативнее`
+        : `гейт DSR молчит (n<30): выводов об edge делать нельзя`;
+  const calNote = f.calibrationReady
+    ? `ECE сырой ${f.eceRaw !== null ? f.eceRaw.toFixed(3) : "?"} → калибр. ${f.eceCal !== null ? f.eceCal.toFixed(3) : "?"} (n=${f.calibrationN}, held-out)`
+    : `калибратор не готов (n=${f.calibrationN}<50) — твоя conviction пока считается сырой`;
   L.push(
     `\n## МОДЕЛЬ СЕЙЧАС
-разобрано исходов: ${f.resolved}; hit-rate ${f.hitRate.toFixed(1)}% — это БАЗА лаборатории, с ней сравнивай историю каждой связки; Brier ${f.brier.toFixed(3)} (0.25=шум, ≤0.20=калибр.); expectancy ${f.expectancyBps.toFixed(1)} bps после издержек ~24 bps round-trip; в ожидании ${f.pending}.`
+разобрано исходов: ${f.resolved}; hit-rate ${f.hitRate.toFixed(1)}% — БАЗА лаборатории (Wilson LB ${f.wilsonLb.toFixed(3)} — нижняя граница честнее точки); Brier внешний ${f.brierExternal !== null ? f.brierExternal.toFixed(3) : "н/д"} (0.25=шум, ≤0.20=калибр.); ${calNote}; expectancy ${f.expectancyBps.toFixed(1)} bps после издержек ~24 bps round-trip; испытания лаборатории: ${f.trials}, ${gateNote}; в ожидании ${f.pending}.`
   );
+
+  if (input.ensemble && input.ensemble.size > 0) {
+    L.push(
+      `\n## АНСАМБЛЬ СРЕЗОВ (независимые агенты: поток / контекст / состояние)
+${ensembleSummary(input.ensemble)}. «ансP» в строке кандидата — их оценка вероятности hit; ± — разброс между агентами. Высокий разброс — агенты не сошлись: либо conviction ниже, либо кандидат не берётся. Ансамбль — свидетельство, не приказ: решаешь ты.`
+    );
+  }
 
   L.push(
     `\n## ТВОЯ ЖЕ ИСТОРИЯ РЕШЕНИЙ (ты под тестом, сравни себя с правилом)
@@ -518,7 +572,7 @@ ${renderArm("Правило EVS", input.record.rule)}`
   );
 
   L.push(`\n## КАНДИДАТЫ (${input.candidates.length}) — выбирать можно только отсюда`);
-  L.push(input.candidates.map((c) => renderCandidate(c, f)).join("\n"));
+  L.push(input.candidates.map((c) => renderCandidate(c, f, input.ensemble)).join("\n"));
 
   L.push(
     `\n## КАК РЕШАЕТСЯ ИСХОД (физика лаборатории, одинакова для всех)

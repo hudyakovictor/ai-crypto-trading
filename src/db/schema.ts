@@ -200,6 +200,42 @@ export const signalFilters = pgTable("signal_filters", {
 });
 
 /**
+ * SHADOW-КНИГА РЕШЕНИЙ (H003, протокол итерации 2).
+ * Каждый предложенный планировщику кандидат логируется ВСЕГДА — выбран он или нет,
+ * с propensity (вероятностью выбора softmax-политикой) и обеими руками (ai и rule).
+ * Через 15 минут кандидаты разрешаются по той же физике, что боевые прогнозы.
+ * Это даёт: (1) paired-сравнение политик на одних циклах; (2) off-policy оценку
+ * (SNIPS/Δ-OPE) альтернативных политик БЕЗ исполнения; (3) счётчик испытаний
+ * для Deflated Sharpe — trials считаются по offered, а не по selected.
+ * Без logged propensity альтернативная политика неоценива [S166,S167].
+ */
+export const shadowDecisions = pgTable("shadow_decisions", {
+  id: serial("id").primaryKey(),
+  cycleAt: timestamp("cycle_at").notNull(),
+  resolveAt: timestamp("resolve_at").notNull(),
+  code: text("code").notNull(),
+  asset: text("asset").notNull(),
+  signature: text("signature").notNull(),
+  direction: text("direction").notNull(),
+  evs: doublePrecision("evs").notNull().default(0),
+  regime: text("regime").notNull().default("NEUTRAL_CONSOLIDATION"),
+  /** Вероятность выбора этого кандидата стохастической политикой (softmax, T=8) */
+  propensityAi: doublePrecision("propensity_ai").notNull().default(0),
+  /** Фактический выбор боевой руки ai/fallback */
+  chosenAi: boolean("chosen_ai").notNull().default(false),
+  /** Что выбрало бы детерминированное правило на том же списке (вторая рука) */
+  chosenRule: boolean("chosen_rule").notNull().default(false),
+  entryPrice: doublePrecision("entry_price").notNull().default(0),
+  status: text("status").notNull().default("pending"), // pending | resolved | expired
+  outcome: text("outcome"), // hit | miss | ambiguous | expired
+  mfePct: doublePrecision("mfe_pct"),
+  realizedReturnNetPct: doublePrecision("realized_return_net_pct"),
+  resolvedPrice: doublePrecision("resolved_price"),
+  resolvedAt: timestamp("resolved_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+/**
  * Кто принимает решение об отборе гипотез. Фильтры выше — это вето человека
  * (что вообще допустимо), эта таблица — кому принадлежит сам выбор: модели или
  * детерминированному правилу. ceiling — страховка от потока записей, а не цель.

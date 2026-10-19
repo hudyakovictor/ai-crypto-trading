@@ -43,10 +43,13 @@ import {
   loadSignatureHistory,
   loadWeightViews,
   planCycle,
+  rulePick,
   signatureFromHypothesis,
   type AssetMoveStats,
   type PoolItem,
 } from "./planner";
+import { computeOpeReport, logCycleDecisions, resolveShadowDecisions } from "./shadow-book";
+import { runEnsemble, type EnsembleVote } from "../ai/ensemble";
 import type { PlannerDecisionRow } from "../ui-types";
 
 export interface CycleResult {
@@ -213,6 +216,13 @@ export class AutonomousScheduler {
         }
       }
 
+      // Step 2.5: Shadow-книга (H003) — разрешить созревшие теневые решения
+      // до боевого разбора: их исходы кормят Δ-OPE и гейт доверия.
+      const shadowResolved = await resolveShadowDecisions(
+        candlesMap,
+        (asset) => tickers.find((t) => t.instId === asset)?.last
+      ).catch(() => 0);
+
       // Step 3: Check and Resolve Due Forecasts
       const pendingForecasts = await db
         .select()
@@ -224,6 +234,8 @@ export class AutonomousScheduler {
         categories: string[];
         outcome: "hit" | "miss" | "ambiguous" | "expired";
         realizedReturn: number;
+        regime?: string;
+        statedProb?: number;
       }[] = [];
 
       let resolvedCount = 0;
@@ -262,10 +274,17 @@ export class AutonomousScheduler {
               .limit(1);
 
             if (hyp.length > 0 && Array.isArray(hyp[0].categoriesJson)) {
+              // H002/H005: обучение несёт ЗАЯВЛЕННУЮ вероятность (planner conviction)
+              // и режим на момент решения — апостериоры режимов и честный Brier.
+              const plannerMeta = (hyp[0].scoreComponentsJson as {
+                planner?: { conviction?: number; regimeAtCreation?: string };
+              } | null)?.planner;
               resolvedEventsForLearning.push({
                 categories: hyp[0].categoriesJson as string[],
                 outcome: resolution.outcome,
                 realizedReturn: resolution.realizedReturnNet,
+                regime: plannerMeta?.regimeAtCreation,
+                statedProb: plannerMeta?.conviction ?? (1 - (hyp[0].uncertainty ?? 0.35)),
               });
 
               // Update hypothesis status
@@ -288,6 +307,9 @@ export class AutonomousScheduler {
       }
 
       // Step 5: Get Current Learned Weights
+      // Веса запрашиваются ПОСЛЕ обучения этого цикла (изменения сразу в деле).
+      // H005: пул строится на regime-специфичных весах — для каждого режима,
+      // встретившегося в studies, отдельная карта; fallback — глобальная.
       const currentWeights = await learningLoop.getWeightsMap();
 
       // Step 6: Market Regime Detection (via FeatureEngine output, see Step 7)
@@ -360,13 +382,19 @@ export class AutonomousScheduler {
       // Step 8: Комбинаторная разведка — 100 вариаций НА АКТИВ.
       // раньше 100 связок строились только по BTC; теперь пул объединяет
       // вариации всех участников вселенной, а ранжирование идёт по EVS.
+      const weightsByRegime = new Map<string, Record<string, number>>([["__global", currentWeights]]);
+      for (const reg of [...new Set(studies.map((st) => st.regime))]) {
+        if (!weightsByRegime.has(reg)) {
+          weightsByRegime.set(reg, await learningLoop.getWeightsMap(reg).catch(() => currentWeights));
+        }
+      }
       const pool = studies.flatMap((st) =>
         combinationEngine
           .generate100Combinations(
             st.symbol,
             st.signals,
             st.regime,
-            currentWeights,
+            weightsByRegime.get(st.regime) ?? currentWeights,
             isLiveTickers ? st.dataQualityScore : 7.5
           )
           .map((c) => ({ ...c, asset: st.symbol, assetLive: st.dataLive, assetRegime: st.regime }))
@@ -478,6 +506,14 @@ export class AutonomousScheduler {
         .map((u) => `${u.symbol} [${u.role === "core" ? "ядро" : "разведка"}] — ${u.reason}`)
         .join("; ");
 
+      // H001: ансамбль асимметричных срезов — параллельно, с собственным бюджетом,
+      // fail-tolerant: пустая карта не меняет поведение планировщика.
+      const ensembleStart = Date.now();
+      const ensemble: Map<string, EnsembleVote> = await runEnsemble(candidates).catch(
+        () => new Map<string, EnsembleVote>()
+      );
+      const ensembleMs = Date.now() - ensembleStart;
+
       const decision = await planCycle({
         candidates,
         policy,
@@ -486,8 +522,34 @@ export class AutonomousScheduler {
         weightsLow: weightViews.weightsLow,
         record,
         universeNote,
+        ensemble,
       });
       this.lastPlannerDecision = decision;
+
+      // H003: shadow-книга. Логируем ВСЕХ предложенных кандидатов и ОБЕ руки:
+      // боевой выбор (ai/fallback) и выбор правила на тех же кандидатах — даже
+      // когда режим боевой руки «rule» (тогда chosenAi=chosenRule, это корректно:
+      // рука определяется тем, КТО решал). Propensity — softmax по value (T=8),
+      // детерминированной политики здесь нет: IPS должен оставаться оцениваемым.
+      const shadowCycleAt = new Date();
+      const shadowResolveAt = new Date(shadowCycleAt.getTime() + 15 * 60 * 1000);
+      const rulePicksForShadow = decision.mode === "rule" ? decision.picks : rulePick(candidates, policy.ceiling);
+      const entryPrices = new Map<string, number>();
+      for (const c of candidates) {
+        if (entryPrices.has(c.asset)) continue;
+        const t = tickers.find((x) => x.instId === c.asset);
+        const cs = candlesMap.get(c.asset) ?? [];
+        const px = t?.last || (cs.length ? cs[cs.length - 1].close : 0);
+        if (px > 0) entryPrices.set(c.asset, px);
+      }
+      const shadowLogged = await logCycleDecisions({
+        candidates,
+        decision,
+        rulePicks: rulePicksForShadow,
+        entryPrices,
+        cycleAt: shadowCycleAt,
+        resolveAt: shadowResolveAt,
+      }).catch(() => 0);
 
       let hypothesesCreated = 0;
 
@@ -540,6 +602,8 @@ export class AutonomousScheduler {
                 model: decision.model,
                 conviction: pick.conviction,
                 why: pick.why,
+                // H005: режим на момент решения — ключ апостериоров и paired-сравнения
+                regimeAtCreation: candidate.assetRegime,
               },
             },
             uncertainty,
@@ -614,6 +678,10 @@ export class AutonomousScheduler {
           : decision.mode === "rule"
             ? "правило EVS"
             : "запасное правило (ИИ недоступен)";
+
+      // Δ-OPE отчёт по накопленной shadow-книге (H003) — разности политик,
+      // не абсолютные значения; публикуется только при гейте доверия ESS/maxW.
+      const ope = await computeOpeReport().catch(() => null);
       const summaryText = `Цикл: вселенная ${universe.length} активов (ядро ${
         universe.filter((u) => u.role === "core").length
       }, разведка ${universe.filter((u) => u.role === "explore").length}), режим ${detectedRegime}, связок ${
@@ -642,6 +710,25 @@ export class AutonomousScheduler {
           // Решение об отборе сохраняется вместе с циклом: история «кто выбирал и
           // что из этого вышло» читается без изменений схемы
           planner: { ...decision, createdAt: new Date().toISOString() },
+          // H001/H003/H004: ансамбль, теневая книга и гейт DSR — аудит каждого цикла
+          ensemble: {
+            votes: ensemble.size,
+            ensembleMs,
+            summary: ensemble.size
+              ? {
+                  meanP:
+                    Number(
+                      ([...ensemble.values()].reduce((a, v) => a + v.p, 0) / ensemble.size).toFixed(4)
+                    ),
+                  meanSpread:
+                    Number(
+                      ([...ensemble.values()].reduce((a, v) => a + v.spread, 0) / ensemble.size).toFixed(4)
+                    ),
+                }
+              : null,
+          },
+          shadow: { logged: shadowLogged, resolved: shadowResolved, ope },
+          gate: { trials: facts.trials, dsr: facts.dsr, verdict: facts.gateVerdict },
           assetsInPool: studies.map((s) => ({
             symbol: s.symbol,
             role: s.role,
