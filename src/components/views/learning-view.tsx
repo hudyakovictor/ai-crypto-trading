@@ -56,7 +56,7 @@ export function LearningView({
       {/* Weights table */}
       <Panel
         title="Веса категорий · Bayesian online-learning"
-        sub={d ? `выборка ${d.totalAccumulatedSamples} · avg Brier ${d.averageBrierScore}` : ""}
+        sub={d ? `выборка ${d.totalAccumulatedSamples} · avg Brier ${d.averageBrierScore ?? "нет данных"}` : ""}
         className="lg:col-span-7"
         pad={false}
         actions={

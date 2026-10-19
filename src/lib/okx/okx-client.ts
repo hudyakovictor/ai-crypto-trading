@@ -19,7 +19,32 @@ export const FALLBACK_SYMBOLS = [
 
 const OKX_BASE_URL = "https://www.okx.com";
 
-export class OKXClient {
+export /** Строгий парсинг уровней стакана: нечисловые строки отбрасываются. */
+function parseLevels(raw: unknown): [number, number][] {
+  if (!Array.isArray(raw)) return [];
+  const out: [number, number][] = [];
+  for (const level of raw) {
+    if (!Array.isArray(level) || level.length < 2) continue;
+    const price = Number(level[0]);
+    const size = Number(level[1]);
+    if (Number.isFinite(price) && Number.isFinite(size) && price > 0 && size > 0) {
+      out.push([price, size]);
+    }
+  }
+  return out;
+}
+
+/** Метка времени из ответа OKX; при мусоре — текущее время. */
+function parseTs(raw: unknown): number {
+  const ts = Number(raw);
+  return Number.isFinite(ts) && ts > 0 ? ts : Date.now();
+}
+
+function errMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+class OKXClient {
   private timeoutMs: number;
 
   constructor(timeoutMs = 5000) {
@@ -139,6 +164,15 @@ export class OKXClient {
     }
   }
 
+  /**
+   * Журнал последних отказов по каждому источнику данных.
+   *
+   * Раньше ошибка глоталась в catch и наружу возвращалась синтетика: понять,
+   * что именно отвалилось (стакан, фандинг, OI, свечи), можно было только по
+   * логам. Теперь последний отказ по каждому источнику виден в /api/research/status.
+   */
+  readonly lastErrors: Record<string, { symbol: string; message: string; at: number }> = {};
+
   async getOrderBook(symbol: string, depth = 20): Promise<{ book: OKXOrderBook; latencyMs: number; isLive: boolean }> {
     const startTime = Date.now();
     try {
@@ -153,21 +187,29 @@ export class OKXClient {
       }
 
       const bookData = json.data[0];
-      const bids: [number, number][] = (bookData.bids || []).map((b: string[]) => [parseFloat(b[0]), parseFloat(b[1])]);
-      const asks: [number, number][] = (bookData.asks || []).map((a: string[]) => [parseFloat(a[0]), parseFloat(a[1])]);
+      // Строгий парсинг: NaN-строки отбрасываются, а не превращаются в мусор,
+      // который потом усредняется в imbalance и меняет направление сигнала.
+      const bids: [number, number][] = parseLevels(bookData.bids);
+      const asks: [number, number][] = parseLevels(bookData.asks);
+      // Пустой стакан — это не стакан. Раньше он уходил в движок как «живой»,
+      // и imbalance считался нулём, то есть признаком равновесия.
+      if (bids.length === 0 || asks.length === 0) {
+        throw new Error("empty order book");
+      }
 
       return {
         book: {
           instId: symbol,
           bids,
           asks,
-          ts: parseInt(bookData.ts || Date.now().toString(), 10),
+          ts: parseTs(bookData.ts),
         },
         latencyMs,
         isLive: true,
       };
     } catch (err) {
       const latencyMs = Date.now() - startTime;
+      this.lastErrors.orderBook = { symbol, message: errMessage(err), at: Date.now() };
       return {
         book: this.generateSyntheticOrderBook(symbol),
         latencyMs,
@@ -191,22 +233,31 @@ export class OKXClient {
       }
 
       const item = json.data[0];
+      // `parseFloat(x) || 0.0001` подменял законный нулевой фандинг и NaN
+      // одной и той же выдуманной константой — категория derivatives_positioning
+      // получала сигнал «фандинг положительный» там, где данных не было.
+      const fundingRate = Number(item.fundingRate);
+      if (!Number.isFinite(fundingRate)) {
+        throw new Error("fundingRate is not a number");
+      }
+      const nextFundingRate = Number(item.nextFundingRate);
       return {
         funding: {
           instId: swapSymbol,
-          fundingRate: parseFloat(item.fundingRate) || 0.0001,
-          fundingTime: parseInt(item.fundingTime, 10) || Date.now(),
-          nextFundingRate: parseFloat(item.nextFundingRate) || 0.0001,
+          fundingRate,
+          fundingTime: parseTs(item.fundingTime),
+          ...(Number.isFinite(nextFundingRate) ? { nextFundingRate } : {}),
         },
         latencyMs,
         isLive: true,
       };
     } catch (err) {
       const latencyMs = Date.now() - startTime;
+      this.lastErrors.fundingRate = { symbol, message: errMessage(err), at: Date.now() };
       return {
         funding: {
           instId: swapSymbol,
-          fundingRate: 0.0001 + (Math.sin(Date.now() / 3600000) * 0.00015),
+          fundingRate: 0,
           fundingTime: Date.now() + 4 * 3600000,
         },
         latencyMs,
@@ -230,27 +281,35 @@ export class OKXClient {
       }
 
       const item = json.data[0];
+      const oi = Number(item.oi);
+      const oiCcy = Number(item.oiCcy);
+      if (!Number.isFinite(oi) || !Number.isFinite(oiCcy)) {
+        throw new Error("open interest is not a number");
+      }
       return {
         oi: {
           instId: swapSymbol,
-          oi: parseFloat(item.oi) || 10000,
-          oiCcy: parseFloat(item.oiCcy) || 750000000,
-          ts: parseInt(item.ts, 10) || Date.now(),
+          oi,
+          oiCcy,
+          ts: parseTs(item.ts),
         },
         latencyMs,
         isLive: true,
       };
     } catch (err) {
       const latencyMs = Date.now() - startTime;
+      this.lastErrors.openInterest = { symbol, message: errMessage(err), at: Date.now() };
+      // Нули и isLive: false вместо констант 12500 / 850000000, которые раньше
+      // выдавались за живые данные и участвовали в расчёте признаков.
       return {
         oi: {
           instId: swapSymbol,
-          oi: 12500,
-          oiCcy: 850000000,
+          oi: 0,
+          oiCcy: 0,
           ts: Date.now(),
         },
-latencyMs,
-        isLive: true,
+        latencyMs,
+        isLive: false,
       };
     }
   }

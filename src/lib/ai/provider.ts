@@ -23,97 +23,27 @@ export const SYSTEM_PROMPT = `Ты — главный квант-аналити�
 6. Учитываешь память лаборатории: не повторяешь дословно предыдущие разборы, а развиваешь или пересматриваешь их при новых данных.
 7. Никаких вступлений, извинений, дисклеймеров и заключительных резюме. Только пронумерованные пункты.`;
 
-export function resolveProviders(): ProviderConfig[] {
-  const list: ProviderConfig[] = [];
-
-  // 1. NVIDIA NIM — приоритетный провайдер
-  const nvidia = process.env.NVIDIA_API_KEY;
-  if (nvidia) {
-    list.push({
-      id: "nvidia-nim",
-      baseUrl: (process.env.NVIDIA_BASE_URL || "https://integrate.api.nvidia.com/v1").replace(/\/$/, ""),
-      apiKey: nvidia,
-      model: process.env.NVIDIA_MODEL || "openai/gpt-oss-20b",
-    });
-  } else {
-    // Хардкод ключа NVIDIA в качестве резерва при отсутствии env vars
-    list.push({
-      id: "nvidia-nim",
-      baseUrl: "https://integrate.api.nvidia.com/v1",
-      apiKey: "nvdia-fallback-key-must-replace",
-      model: "meta/llama-3.3-70b-instruct",
-    });
-  }
-
-  // 2. OpenCode — вторичный провайдер
-  const opencode = process.env.OPENCODE_API_KEY;
-  if (opencode) {
-    list.push({
-      id: "opencode",
-      baseUrl: (process.env.OPENCODE_BASE_URL || "https://opencode.ai/zen/v1").replace(/\/$/, ""),
-      apiKey: opencode,
-      model: process.env.OPENCODE_MODEL || "claude-sonnet-4-5",
-    });
-  }
-
-  // 3. OpenAI-compatible провайдеры
-  const baseUrl = process.env.LLM_BASE_URL;
-  const apiKey = process.env.LLM_API_KEY || process.env.OPENAI_API_KEY;
-  if (baseUrl && apiKey) {
-    list.push({
-      id: "openai-compat",
-      baseUrl: baseUrl.replace(/\/$/, ""),
-      apiKey,
-      model: process.env.LLM_MODEL || "gpt-4o-mini",
-    });
-  }
-
-  // FAST_MODELS: 3 быстрых провайдера для экономного использования
-  const fastModels: ProviderConfig[] = [];
-  if (process.env.FAST_MODEL_1_KEY && process.env.FAST_MODEL_1_URL) {
-    fastModels.push({
-      id: "fast-1",
-      baseUrl: process.env.FAST_MODEL_1_URL.replace(/\/$/, ""),
-      apiKey: process.env.FAST_MODEL_1_KEY,
-      model: process.env.FAST_MODEL_1_NAME || "gpt-4o-mini",
-    });
-  }
-  if (process.env.FAST_MODEL_2_KEY && process.env.FAST_MODEL_2_URL) {
-    fastModels.push({
-      id: "fast-2",
-      baseUrl: process.env.FAST_MODEL_2_URL.replace(/\/$/, ""),
-      apiKey: process.env.FAST_MODEL_2_KEY,
-      model: process.env.FAST_MODEL_2_NAME || "gpt-4o-mini",
-    });
-  }
-  if (process.env.FAST_MODEL_3_KEY && process.env.FAST_MODEL_3_URL) {
-    fastModels.push({
-      id: "fast-3",
-      baseUrl: process.env.FAST_MODEL_3_URL.replace(/\/$/, ""),
-      apiKey: process.env.FAST_MODEL_3_KEY,
-      model: process.env.FAST_MODEL_3_NAME || "gpt-4o-mini",
-    });
-  }
-  list.push(...fastModels);
-
-  // 4. gpt4free — бесплатный фолбэк
-  list.push({
-    id: "gpt4free",
-    baseUrl: (process.env.GPT4FREE_BASE_URL || "https://api.gpt4free.co/v1").replace(/\/$/, ""),
-    apiKey: "",
-    model: process.env.GPT4FREE_MODEL || "gpt-3.5-turbo",
-  });
-
-  // 5. Хардкод ключей как последний резерв
-  list.push({
-    id: "hardcoded-reserve",
-    baseUrl: "https://api.openai.com/v1",
-    apiKey: "sk-fallback-must-replace",
-    model: "gpt-4o-mini",
-  });
-
-  return list;
-}
+/**
+ * СПИСОК ПРОВАЙДЕРОВ БОЛЬШЕ НЕ СОБИРАЕТСЯ В ЭТОМ ФАЙЛЕ.
+ *
+ * Здесь жила функция resolveProviders(), которая при отсутствии
+ * NVIDIA_API_KEY подставляла в конфиг захардкоженные строки-заглушки,
+ * похожие на ключи, и всегда добавляла «последний резерв» с фейковым
+ * токеном OpenAI. Последствия были такими:
+ *   • в репозитории лежали строки, неотличимые от секретов: сканеры и
+ *     ревьюеры тратили время, а настоящий случайно закоммиченный ключ в
+ *     таком шуме терялся;
+ *   • цепочка вызовов содержала заведомо нерабочие звенья — каждый запрос
+ *     делал лишние сетевые обращения с невалидным Bearer-токеном и ждал их
+ *     таймаута, прежде чем честно упасть в glassbox;
+ *   • analyzeWithAI(), единственный потребитель resolveProviders(), не
+ *     вызывалась ниоткуда: рабочий путь идёт через
+ *     resolveProvidersFromSettings() в lib/ai/settings.ts, где порядок и
+ *     ключи задаёт пользователь и хранит их в БД, а не в коде.
+ *
+ * Обе мёртвые функции удалены. Единственный источник конфигурации —
+ * resolveProvidersFromSettings() и переменные окружения, которые он читает.
+ */
 
 /**
  * Системный промпт для свободных follow-up вопросов в чате («ты тут?», «а если только UP?»).
@@ -191,37 +121,31 @@ export async function callProvider(
   }
 }
 
-/** Пытается вызвать провайдер с автомаческим переключением при ошибке. */
-export async function analyzeWithAI(userPrompt: string, timeoutMs = 28000): Promise<string> {
-  const providers = resolveProviders();
-  let lastError: Error | null = null;
-
-  for (const provider of providers) {
-    try {
-      const result = await callProvider(provider, userPrompt, timeoutMs);
-      return result;
-    } catch (err: any) {
-      lastError = err;
-      console.warn(`AI provider ${provider.id} failed: ${err.message}`);
-      continue;
-    }
-  }
-
-  throw new Error(`All AI providers failed. Last error: ${lastError?.message || "unknown"}`);
-}
-
-/** Извлекает строку «ПАРАМЕТРЫ: EVS=..., категорий=..., гипотез=...» из ответа модели. */
+/**
+ * Извлекает строку «ПАРАМЕТРЫ: EVS=..., категорий=..., гипотез=...» из ответа модели.
+ *
+ * Две ошибки разбора, из-за которых параметры модели молча терялись:
+ *  1. `\w` в JavaScript без флага `u` означает только [A-Za-z0-9_], поэтому
+ *     `категор\w*` не матчил русское слово «категорий»: после «категор» шли
+ *     «ий», и шаблон требовал знак равенства сразу за «категор». То есть
+ *     `минимальное число категорий` из ответа модели не извлекалось НИКОГДА —
+ *     при том что системный промпт требует писать именно «категорий=N».
+ *     Теперь используется `\p{L}*` с флагом `u` (любые буквы любого алфавита).
+ *  2. `EVS\s*[=:]\s*(\d{2,3})` отвергал однозначные значения («EVS=5»),
+ *     хотя ниже стоит клампер до 10. Модель, попросившая слишком низкий порог,
+ *     игнорировалась вместо того, чтобы быть зажатой в допустимый диапазон.
+ */
 export function parseParamsFromText(text: string): Partial<{
   minEvs: number;
   minCategories: number;
   maxHypothesesPerCycle: number;
 }> {
   const out: Partial<{ minEvs: number; minCategories: number; maxHypothesesPerCycle: number }> = {};
-  const evs = text.match(/EVS\s*[=:]\s*(\d{2,3})/i);
+  const evs = text.match(/EVS\s*[=:]\s*(\d{1,3})/iu);
   if (evs) out.minEvs = Math.max(10, Math.min(95, Number(evs[1])));
-  const cats = text.match(/категор\w*\s*[=:]\s*(\d)/i);
+  const cats = text.match(/категор\p{L}*\s*[=:]\s*(\d)/iu);
   if (cats) out.minCategories = Math.max(1, Math.min(5, Number(cats[1])));
-  const hyp = text.match(/гипотез\w*\s*[=:]\s*(\d{1,3})/i);
+  const hyp = text.match(/гипотез\p{L}*\s*[=:]\s*(\d{1,3})/iu);
   if (hyp) out.maxHypothesesPerCycle = Math.max(1, Math.min(100, Number(hyp[1])));
   return out;
 }

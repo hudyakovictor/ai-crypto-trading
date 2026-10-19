@@ -23,7 +23,8 @@ export function Topbar({
   onRun: () => void;
   onOpenSettings: () => void;
   onClearHistory: () => void;
-  countdown: number;
+  /** null — расписание ещё не известно (процесс не сделал ни одной попытки цикла). */
+  countdown: number | null;
   /** Primary CTA «Запустить цикл» показываем только на главном экране */
   showRun?: boolean;
 }) {
@@ -63,10 +64,14 @@ export function Topbar({
       <div className="flex items-center gap-2.5">
         <div
           className="flex items-center gap-1.5 text-text-3"
-          title={`Следующий авто-цикл через ${fmtCountdown(countdown)} · интервал планировщика 15 минут`}
+          title={
+            countdown === null
+              ? "Расписание ещё не известно: серверный автопилот не сделал ни одной попытки цикла"
+              : `Следующий авто-цикл через ${fmtCountdown(countdown)} · интервал планировщика ${status?.scheduler.intervalMinutes ?? 15} минут`
+          }
         >
           <Radio className="size-3.5" strokeWidth={1.8} />
-          <span className="num text-[14px]">{fmtCountdown(countdown)}</span>
+          <span className="num text-[14px]">{countdown === null ? "—" : fmtCountdown(countdown)}</span>
           <span className="text-[13px] uppercase tracking-[0.12em] text-text-3">до цикла</span>
         </div>
         <button

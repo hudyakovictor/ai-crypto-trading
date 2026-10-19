@@ -6,9 +6,19 @@ import { UNIVERSE_CONFIG, scanUniverse, type UniverseMember } from "./universe";
 
 export interface ActiveUniverse {
   universe: UniverseMember[];
-  /** Откуда взялся состав: важно для честной подписи в UI. */
-  source: "memory" | "persisted" | "live-scan";
+  /** Откуда взялся состав: важно для честной подписи в UI. "none" — данных нет,
+   *  и это не скрывается за пустым массивом якобы живой вселенной. */
+  source: "memory" | "persisted" | "live-scan" | "none";
   cycleMs?: number;
+}
+
+export interface LoadUniverseOptions {
+  /**
+   * Разрешён ли живой скан OKX. Read-only поллинг (статус, тепловая карта)
+   * обязан ставить false: скан — это ~33 запроса к бирже плюс мутация
+   * счётчиков серий в памяти, и раньше их порождал каждый опрос дашборда.
+   */
+  allowScan?: boolean;
 }
 
 function isUniverseArray(value: unknown): value is UniverseMember[] {
@@ -35,7 +45,8 @@ const SCAN_TTL_MS = 90_000;
  * Живой скан это редкий путь (первый запуск после рестарта сервера), поэтому
  * он и оправдывает свою латентность, и не даёт UI показывать пустой экран.
  */
-export async function loadActiveUniverse(): Promise<ActiveUniverse> {
+export async function loadActiveUniverse(options: LoadUniverseOptions = {}): Promise<ActiveUniverse> {
+  const allowScan = options.allowScan !== false;
   const inMemory = autonomousScheduler.getUniverse();
   if (inMemory.length > 0) {
     return { universe: inMemory, source: "memory" };
@@ -69,6 +80,10 @@ export async function loadActiveUniverse(): Promise<ActiveUniverse> {
   // держим результат в кэше, пока планировщик не выполнит первый цикл.
   if (scanCache && Date.now() - scanCache.at < SCAN_TTL_MS) {
     return scanCache.result;
+  }
+  if (!allowScan) {
+    // Кэша нет, а сканировать запрещено: честно сообщаем, что состава нет.
+    return { universe: [], source: "none" };
   }
   const { universe } = await scanUniverse(UNIVERSE_CONFIG, scanFallbacks++);
   const result: ActiveUniverse = { universe, source: "live-scan" };

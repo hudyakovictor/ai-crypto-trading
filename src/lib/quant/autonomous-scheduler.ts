@@ -9,14 +9,15 @@ import {
   experimentRuns,
   dataQualityLogs,
 } from "@/db/schema";
-import { eq, lte, and, inArray } from "drizzle-orm";
+import { eq, and, inArray, gte } from "drizzle-orm";
 import { okxClient } from "../okx/okx-client";
 import { featureEngine } from "./feature-engine";
 import { combinationEngine } from "./combination-engine";
 import { hypothesisEngine } from "./hypothesis-engine";
 import { outcomeEvaluator } from "./outcome-evaluator";
 import { learningLoop } from "./learning-loop";
-import { CategoryKey, MarketRegime, NormalizedSignal, OKXCandle } from "../types";
+import { BAR_MS, MAX_RESOLUTION_DELAY_MS } from "./outcome-contract";
+import { CATEGORY_KEYS, CategoryKey, MarketRegime, NormalizedSignal, OKXCandle } from "../types";
 import {
   ALL_DIRECTIONS,
   ALL_OPERATORS,
@@ -51,15 +52,18 @@ import type { PlannerDecisionRow } from "../ui-types";
 
 export interface CycleResult {
   timestamp: string;
-  isLiveOKX: boolean;
+  /** null — цикл не выполнялся (пропуск) или данные не живые: выдумывать «true» нельзя. */
+  isLiveOKX: boolean | null;
   latencyMs: number;
   trackedCount: number;
   universe: UniverseMember[];
-  marketRegime: MarketRegime;
+  marketRegime: MarketRegime | null;
   combinationsGenerated: number;
   hypothesesCreated: number;
   forecastsResolved: number;
   learningUpdated: boolean;
+  /** Причина пропуска, если цикл не выполнялся. */
+  skipped?: "concurrent_run";
   summary: string;
   /** Кто на этом цикле решил «сколько гипотез и какие»: модель, правило или запас */
   planner: PlannerDecisionRow | null;
@@ -68,6 +72,10 @@ export interface CycleResult {
 export class AutonomousScheduler {
   private isRunning = false;
   private lastRunTime: Date | null = null;
+  /** Когда цикл был предпринят в последний раз (успешно или нет) — основа каденса и backoff. */
+  private lastAttemptTime: Date | null = null;
+  /** Подряд идущие аварии: для экспоненциального backoff вместо ретрая каждую минуту. */
+  private consecutiveErrors = 0;
   private nextRunTime: Date | null = null;
   private intervalMinutes = 15;
   /** Номер цикла — детерминированное «семя» для exploration-слотов */
@@ -89,6 +97,19 @@ export class AutonomousScheduler {
     return this.lastRunTime;
   }
 
+  getLastAttemptTime(): Date | null {
+    return this.lastAttemptTime;
+  }
+
+  getConsecutiveErrors(): number {
+    return this.consecutiveErrors;
+  }
+
+  /** Идёт ли цикл прямо сейчас: нужно read-only эндпоинтам и UI. */
+  isCycleRunning(): boolean {
+    return this.isRunning;
+  }
+
   getNextRunTime(): Date | null {
     if (!this.lastRunTime) {
       return new Date(Date.now() + 15 * 60 * 1000);
@@ -101,23 +122,28 @@ export class AutonomousScheduler {
    */
   async runCycle(isManualTrigger = false): Promise<CycleResult> {
     if (this.isRunning) {
+      // Честный пропуск: раньше здесь возвращался «успешный» результат с
+      // isLiveOKX: true и выдуманным режимом рынка, и UI показывал тост
+      // «Цикл завершён» для цикла, которого не было.
       return {
         timestamp: new Date().toISOString(),
-        isLiveOKX: true,
+        isLiveOKX: null,
         latencyMs: 0,
-        trackedCount: 0,
+        trackedCount: this.lastUniverse.length,
         universe: this.lastUniverse,
-        marketRegime: "NEUTRAL_CONSOLIDATION",
+        marketRegime: null,
         combinationsGenerated: 0,
         hypothesesCreated: 0,
         forecastsResolved: 0,
         learningUpdated: false,
-        summary: "Cycle already in progress. Skipping concurrent run.",
+        skipped: "concurrent_run",
+        summary: "Цикл уже выполняется — одновременный запуск пропущен.",
         planner: this.lastPlannerDecision,
       };
     }
 
     this.isRunning = true;
+    this.lastAttemptTime = new Date();
     const cycleStartTime = Date.now();
 
     try {
@@ -132,15 +158,21 @@ export class AutonomousScheduler {
       for (const [sym, bundle] of series) candlesMap.set(sym, bundle.candles);
       let btcCandles = candlesMap.get(UNIVERSE_ANCHOR) ?? [];
 
-      // Свечи нужны и для активов, которые уже вышли из вселенной, но ещё имеют
-      // незакрытые прогнозы: иначе ротация состава ломала бы учёт исходов.
-      const pendingForResolution = await db
+      // Незакрытые прогнозы читаются ОДИН раз за цикл: раньше этот же запрос
+      // повторялся ниже (перед разрешением исходов), что давало лишний seq scan
+      // и расхождение списков при конкурентной записи.
+      const pendingForecasts = await db
         .select()
         .from(forecastsTable)
         .where(eq(forecastsTable.status, "pending"));
+
+      // Свечи нужны и для активов, которые уже вышли из вселенной, но ещё имеют
+      // незакрытые прогнозы: иначе ротация состава ломала бы учёт исходов.
+      // Лимита «12 активов» больше нет: без цены прогноз разрешался фиктивно
+      // (по цене входа), а это выдуманная метка в обучении.
       const missingSymbols = [
-        ...new Set(pendingForResolution.map((f) => f.asset).filter((a) => !candlesMap.has(a))),
-      ].slice(0, 12);
+        ...new Set(pendingForecasts.map((f) => f.asset).filter((a) => !candlesMap.has(a))),
+      ];
       if (missingSymbols.length > 0) {
         const extra = await fetchSeries(missingSymbols, "15m", 24);
         for (const [sym, bundle] of extra) candlesMap.set(sym, bundle.candles);
@@ -186,104 +218,151 @@ export class AutonomousScheduler {
         }
       }
 
-      // История свечей: по 3 последние свечи на участника вселенной
-      for (const member of universe) {
-        for (const c of (candlesMap.get(member.symbol) ?? []).slice(-3)) {
-          const cDate = new Date(c.timestamp);
-          const existing = await db
-            .select()
-            .from(candlesTable)
-            .where(and(eq(candlesTable.symbol, member.symbol), eq(candlesTable.timestamp, cDate)))
-            .limit(1);
-
-          if (existing.length === 0) {
-            await db.insert(candlesTable).values({
-              symbol: member.symbol,
-              timeframe: "15m",
-              timestamp: cDate,
-              open: c.open,
-              high: c.high,
-              low: c.low,
-              close: c.close,
-              volume: c.volume,
-              volCcy: c.volCcy,
-              confirmed: true,
-            });
+      // История свечей: сохраняется ВСЁ окно (60 баров), а не 3 последних.
+      // Накопленная история — это топливо обучения: без неё невозможен ни
+      // бэктест, ни walk-forward, ни оценка базовой частоты движения актива.
+      // Запись батчем: один запрос на чтение существующих баров и один на вставку.
+      const liveUniverseSymbols = universe.filter((u) => u.dataLive).map((u) => u.symbol);
+      let candlesInserted = 0;
+      if (liveUniverseSymbols.length > 0) {
+        const wanted: { symbol: string; c: OKXCandle }[] = [];
+        let minTs = Number.POSITIVE_INFINITY;
+        for (const sym of liveUniverseSymbols) {
+          for (const c of candlesMap.get(sym) ?? []) {
+            if (c.timestamp < minTs) minTs = c.timestamp;
+            wanted.push({ symbol: sym, c });
           }
+        }
+        const existingRows =
+          wanted.length > 0 && Number.isFinite(minTs)
+            ? await db
+                .select({ symbol: candlesTable.symbol, timestamp: candlesTable.timestamp })
+                .from(candlesTable)
+                .where(
+                  and(
+                    inArray(candlesTable.symbol, liveUniverseSymbols),
+                    gte(candlesTable.timestamp, new Date(minTs))
+                  )
+                )
+            : [];
+        const seen = new Set(existingRows.map((r) => `${r.symbol}|${r.timestamp.getTime()}`));
+        const nowMs = Date.now();
+        const rowsToInsert = wanted
+          .filter(({ symbol, c }) => !seen.has(`${symbol}|${c.timestamp}`))
+          .map(({ symbol, c }) => ({
+            symbol,
+            timeframe: "15m",
+            timestamp: new Date(c.timestamp),
+            open: c.open,
+            high: c.high,
+            low: c.low,
+            close: c.close,
+            volume: c.volume,
+            volCcy: c.volCcy,
+            // Последний бар OKX отдаёт незакрытым: помечаем честно, иначе он
+            // участвует в экстремумах MFE/MAE и завышает hit-rate.
+            confirmed: c.timestamp + BAR_MS <= nowMs,
+          }));
+        if (rowsToInsert.length > 0) {
+          for (let i = 0; i < rowsToInsert.length; i += 500) {
+            await db.insert(candlesTable).values(rowsToInsert.slice(i, i + 500));
+          }
+          candlesInserted = rowsToInsert.length;
         }
       }
 
-      // Step 3: Check and Resolve Due Forecasts
-      const pendingForecasts = await db
-        .select()
-        .from(forecastsTable)
-        .where(eq(forecastsTable.status, "pending"));
-
+      // Step 3: Разрешение созревших прогнозов.
+      // Три правила честности метки:
+      //   — нет цены на момент разрешения → expired, а не «miss по цене входа»;
+      //   — разрешение сильно позже горизонта → expired (проверяли уже другой рынок);
+      //   — expired не участвует в обучении весов.
       const now = new Date();
-      const resolvedEventsForLearning: {
-        categories: string[];
-        outcome: "hit" | "miss" | "ambiguous" | "expired";
-        realizedReturn: number;
-      }[] = [];
-
       let resolvedCount = 0;
+      let expiredCount = 0;
 
-      for (const fc of pendingForecasts) {
-        // Resolve if past resolution time or if manual trigger testing
-        const isPastHorizon = new Date(fc.resolveAt) <= now;
-        if (isPastHorizon) {
-          const symCandles = candlesMap.get(fc.asset) || [];
-          const currentPrice = tickers.find((t) => t.instId === fc.asset)?.last || fc.entryPrice;
+      const due = pendingForecasts.filter((fc) => new Date(fc.resolveAt) <= now);
+      const dueHypIds = [
+        ...new Set(due.map((f) => f.hypothesisId).filter((x): x is number => typeof x === "number")),
+      ];
+      const dueHypRows =
+        dueHypIds.length > 0
+          ? await db
+              .select({
+                id: hypothesesTable.id,
+                categoriesJson: hypothesesTable.categoriesJson,
+              })
+              .from(hypothesesTable)
+              .where(inArray(hypothesesTable.id, dueHypIds))
+          : [];
+      const dueHypById = new Map(dueHypRows.map((h) => [h.id, h]));
 
-          const resolution = outcomeEvaluator.evaluate(fc, currentPrice, symCandles);
+      for (const fc of due) {
+        const symCandles = candlesMap.get(fc.asset) ?? [];
+        const tickerPrice = tickers.find((t) => t.instId === fc.asset)?.last;
+        // Цена разрешения: тикер, а если его нет — закрытие последнего бара окна.
+        // Подстановка цены входа (прежнее поведение) давала выдуманный исход.
+        const lastBarClose = symCandles.length > 0 ? symCandles[symCandles.length - 1].close : 0;
+        const currentPrice = tickerPrice && tickerPrice > 0 ? tickerPrice : lastBarClose;
+        const delayMs = now.getTime() - new Date(fc.resolveAt).getTime();
 
+        const hyp = fc.hypothesisId ? dueHypById.get(fc.hypothesisId) : undefined;
+        const categories = Array.isArray(hyp?.categoriesJson) ? (hyp!.categoriesJson as string[]) : [];
+
+        if (!(currentPrice > 0) || delayMs > MAX_RESOLUTION_DELAY_MS) {
+          expiredCount++;
           await db
             .update(forecastsTable)
             .set({
-              status: "resolved",
-              outcome: resolution.outcome,
-              resolvedPrice: resolution.resolvedPrice,
-              mfe: resolution.mfe,
-              mae: resolution.mae,
-              realizedReturnNet: resolution.realizedReturnNet,
-              errorType: resolution.errorType,
-              resolvedAt: resolution.resolvedAt,
+              status: "expired",
+              outcome: "expired",
+              resolvedPrice: currentPrice > 0 ? currentPrice : null,
+              errorType: "data_gap",
+              resolvedAt: now,
             })
             .where(eq(forecastsTable.id, fc.id));
-
-          resolvedCount++;
-
-          // Look up corresponding hypothesis categories
           if (fc.hypothesisId) {
-            const hyp = await db
-              .select()
-              .from(hypothesesTable)
-              .where(eq(hypothesesTable.id, fc.hypothesisId))
-              .limit(1);
-
-            if (hyp.length > 0 && Array.isArray(hyp[0].categoriesJson)) {
-              resolvedEventsForLearning.push({
-                categories: hyp[0].categoriesJson as string[],
-                outcome: resolution.outcome,
-                realizedReturn: resolution.realizedReturnNet,
-              });
-
-              // Update hypothesis status
-              await db
-                .update(hypothesesTable)
-                .set({
-                  status: resolution.outcome === "hit" ? "fulfilled" : "invalidated",
-                })
-                .where(eq(hypothesesTable.id, fc.hypothesisId));
-            }
+            await db
+              .update(hypothesesTable)
+              .set({ status: "expired" })
+              .where(eq(hypothesesTable.id, fc.hypothesisId));
           }
+          continue;
+        }
+
+        const resolution = outcomeEvaluator.evaluate(fc, currentPrice, symCandles);
+
+        await db
+          .update(forecastsTable)
+          .set({
+            status: "resolved",
+            outcome: resolution.outcome,
+            resolvedPrice: resolution.resolvedPrice,
+            mfe: resolution.mfe,
+            mae: resolution.mae,
+            realizedReturnNet: resolution.realizedReturnNet,
+            errorType: resolution.caveat === "no_bars_in_window" ? "data_gap" : resolution.errorType,
+            resolvedAt: resolution.resolvedAt,
+          })
+          .where(eq(forecastsTable.id, fc.id));
+
+        resolvedCount++;
+
+        if (fc.hypothesisId) {
+          await db
+            .update(hypothesesTable)
+            .set({ status: resolution.outcome === "hit" ? "fulfilled" : "invalidated" })
+            .where(eq(hypothesesTable.id, fc.hypothesisId));
         }
       }
 
-      // Step 4: Online Learning - Update weights in Postgres based on accumulated outcomes
+      // Step 4: Обучение. Пересчёт АБСОЛЮТНЫЙ и идемпотентный: веса читаются из
+      // всей истории одним SQL-агрегатом. Прежний инкрементальный вызов здесь
+      // плюс повторное «переобучение на всей истории» в автопилоте считали
+      // каждый исход заново каждый цикл (totalSamples рос квадратично).
       let learningUpdated = false;
-      if (resolvedEventsForLearning.length > 0) {
-        await learningLoop.updateFromOutcomes(resolvedEventsForLearning);
+      let learningStats: Awaited<ReturnType<typeof learningLoop.rebuildFromHistory>> | null = null;
+      if (resolvedCount > 0) {
+        learningStats = await learningLoop.rebuildFromHistory();
         learningUpdated = true;
       }
 
@@ -315,9 +394,12 @@ export class AutonomousScheduler {
         const feOut = featureEngine.calculate15Categories({
           symbol: sym,
           candles,
-          book: bookRes.book,
-          funding: fundingRes.funding,
-          oi: oiRes.oi,
+          // Фолбэки OKX больше не попадают в признаки: синтетический стакан,
+          // выдуманный фандинг и константный OI раньше приходили сюда как
+          // данные, и категории считались на галлюцинациях.
+          book: bookRes.isLive ? bookRes.book : undefined,
+          funding: fundingRes.isLive ? fundingRes.funding : undefined,
+          oi: oiRes.isLive ? oiRes.oi : undefined,
           btcCandles,
           allTickersPerformance: allTickersPerf,
         });
@@ -331,6 +413,12 @@ export class AutonomousScheduler {
           // Живые ли именно свечи этого актива: синтетика не должна участвовать
           // в отборе гипотез, даже если остальной рынок читается нормально.
           dataLive: member.dataLive && candles.length >= UNIVERSE_CONFIG.minCandles,
+          // Какие источники этого актива пришли синтетикой — пишется в журнал качества.
+          syntheticInputs: [
+            bookRes.isLive ? null : "book",
+            fundingRes.isLive ? null : "funding",
+            oiRes.isLive ? null : "oi",
+          ].filter((x): x is string => x !== null),
         };
       });
 
@@ -354,7 +442,6 @@ export class AutonomousScheduler {
 
       const anchorStudy = studies.find((s) => s.symbol === UNIVERSE_ANCHOR) ?? studies[0];
       const detectedRegime: MarketRegime = anchorStudy?.regime ?? "NEUTRAL_CONSOLIDATION";
-      const signals15: Record<CategoryKey, NormalizedSignal> = anchorStudy?.signals ?? ({} as never);
       this.lastUniverse = universe;
 
       // Step 8: Комбинаторная разведка — 100 вариаций НА АКТИВ.
@@ -618,15 +705,19 @@ export class AutonomousScheduler {
         universe.filter((u) => u.role === "core").length
       }, разведка ${universe.filter((u) => u.role === "explore").length}), режим ${detectedRegime}, связок ${
         pool.length
-      }, кандидатов ${decision.offered}, решил ${decidedBy} → гипотез ${hypothesesCreated}, решено ${resolvedCount}, обучение обновлено: ${learningUpdated}.`;
+      }, кандидатов ${decision.offered}, решил ${decidedBy} → гипотез ${hypothesesCreated}, разрешено ${resolvedCount}${
+        expiredCount > 0 ? `, протухло без цены ${expiredCount}` : ""
+      }, баров сохранено ${candlesInserted}, обучение: ${
+        learningStats ? `пересчёт по ${learningStats.events} исходам, Brier ${learningStats.averageBrier}` : "без изменений"
+      }.`;
 
       await db.insert(experimentRuns).values({
         runType: isManualTrigger ? "manual_trigger_15m" : "scheduled_15m",
-        totalSignalsProcessed: studies.length * Object.keys(signals15).length,
+        totalSignalsProcessed: studies.length * CATEGORY_KEYS.length,
         combinationsGenerated: pool.length,
         hypothesesCreated,
         forecastsResolved: resolvedCount,
-        learningUpdatesCount: learningUpdated ? 15 : 0,
+        learningUpdatesCount: learningStats?.categories ?? 0,
         regimeDetected: detectedRegime,
         logSummary: summaryText,
         metricsJson: {
@@ -639,6 +730,12 @@ export class AutonomousScheduler {
           listedCount,
           floorCount,
           droppedSymbols,
+          candlesInserted,
+          forecastsExpired: expiredCount,
+          learning: learningStats,
+          syntheticInputs: studies
+            .filter((s) => s.syntheticInputs.length > 0)
+            .map((s) => ({ symbol: s.symbol, missing: s.syntheticInputs })),
           // Решение об отборе сохраняется вместе с циклом: история «кто выбирал и
           // что из этого вышло» читается без изменений схемы
           planner: { ...decision, createdAt: new Date().toISOString() },
@@ -654,6 +751,7 @@ export class AutonomousScheduler {
       });
 
       this.lastRunTime = new Date();
+      this.consecutiveErrors = 0;
       this.nextRunTime = new Date(Date.now() + this.intervalMinutes * 60 * 1000);
 
       return {
@@ -670,6 +768,9 @@ export class AutonomousScheduler {
         summary: summaryText,
         planner: decision,
       };
+    } catch (err) {
+      this.consecutiveErrors += 1;
+      throw err;
     } finally {
       this.isRunning = false;
     }

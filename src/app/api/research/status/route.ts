@@ -8,14 +8,29 @@ import {
   experimentRuns,
   dataQualityLogs,
 } from "@/db/schema";
-import { desc, eq } from "drizzle-orm";
+import { desc, eq, sql } from "drizzle-orm";
 import { autonomousScheduler } from "@/lib/quant/autonomous-scheduler";
 import { loadActiveUniverse, type ActiveUniverse } from "@/lib/quant/universe-store";
 import type { UniverseMember } from "@/lib/quant/universe";
-import { getAutopilotState } from "@/lib/quant/autopilot";
+import { getAutopilotState, CYCLE_INTERVAL_MIN } from "@/lib/quant/autopilot";
 import { CATEGORY_DEFINITIONS, CATEGORY_KEYS } from "@/lib/types";
 import type { PlannerDecisionRow } from "@/lib/ui-types";
 
+export const dynamic = "force-dynamic";
+
+/**
+ * Статусный экран лаборатории.
+ *
+ * Что изменено и почему:
+ *  - Агрегаты (число активов, активных гипотез, исходы, Brier) считаются в SQL.
+ *    Раньше ради четырёх чисел поднимались ВСЕ разрешённые прогнозы и все веса,
+ *    а это происходило каждые 20 секунд из каждого открытого дашборда.
+ *  - `empiricalHitRate` больше не выдуман: если решённых исходов нет — null,
+ *    а не «50.0». То же для Brier (раньше 0.25 означало «как монетка», хотя
+ *    данных не было вообще).
+ *  - Хитрейт считается по hit/(hit+miss): неоднозначные исходы — это пропуск
+ *    данных, а не исход, и в знаменатель им нельзя.
+ */
 export async function GET() {
   try {
     const assetsList = await db
@@ -49,27 +64,44 @@ export async function GET() {
       .orderBy(desc(dataQualityLogs.createdAt))
       .limit(5);
 
-    // Compute aggregate forecast outcome statistics
-    const resolvedForecasts = await db
-      .select()
-      .from(forecasts)
-      .where(eq(forecasts.status, "resolved"));
+    // Агрегаты — одним запросом к БД, без загрузки всей истории в память.
+    const [countsRows, assetsRows, activeRows, brierRows] = await Promise.all([
+      db
+        .select({
+          hits: sql<number>`count(*) filter (where ${forecasts.outcome} = 'hit')::int`,
+          misses: sql<number>`count(*) filter (where ${forecasts.outcome} = 'miss')::int`,
+          ambiguous: sql<number>`count(*) filter (where ${forecasts.outcome} = 'ambiguous')::int`,
+          totalResolved: sql<number>`count(*)::int`,
+        })
+        .from(forecasts)
+        .where(eq(forecasts.status, "resolved")),
+      db.select({ total: sql<number>`count(*)::int` }).from(assets),
+      db.select({ total: sql<number>`count(*)::int` }).from(hypotheses).where(eq(hypotheses.status, "active")),
+      db
+        .select({
+          avg: sql<number | null>`avg(${learningWeights.brierScore}) filter (where ${learningWeights.totalSamples} > 0)`,
+        })
+        .from(learningWeights),
+    ]);
 
-    const hits = resolvedForecasts.filter((f) => f.outcome === "hit").length;
-    const misses = resolvedForecasts.filter((f) => f.outcome === "miss").length;
-    const ambiguous = resolvedForecasts.filter((f) => f.outcome === "ambiguous").length;
-    const totalResolved = resolvedForecasts.length;
-    const empiricalHitRate = totalResolved > 0 ? (hits / totalResolved) * 100 : 50.0;
-
-    // Average Brier score
-    const avgBrier = weights.length > 0
-      ? weights.reduce((acc, w) => acc + w.brierScore, 0) / weights.length
-      : 0.25;
+    const counts = countsRows[0];
+    const hits = counts?.hits ?? 0;
+    const misses = counts?.misses ?? 0;
+    const ambiguous = counts?.ambiguous ?? 0;
+    const totalResolved = counts?.totalResolved ?? 0;
+    const decided = hits + misses;
+    const empiricalHitRate = decided > 0 ? (hits / decided) * 100 : null;
+    const avgBrierRaw = brierRows[0]?.avg;
+    const avgBrier = avgBrierRaw === null || avgBrierRaw === undefined ? null : Number(avgBrierRaw);
 
     const lastRun = autonomousScheduler.getLastRunTime();
-    const nextRun = autonomousScheduler.getNextRunTime();
+    const lastAttempt = autonomousScheduler.getLastAttemptTime() ?? lastRun;
+    const nextRun =
+      autonomousScheduler.getNextRunTime() ??
+      (lastAttempt ? new Date(lastAttempt.getTime() + CYCLE_INTERVAL_MIN * 60 * 1000) : null);
     const now = Date.now();
-    const secondsToNextRun = nextRun ? Math.max(0, Math.floor((nextRun.getTime() - now) / 1000)) : 900;
+    // null, когда процесс ещё не сделал ни одной попытки: «900» здесь было выдумкой.
+    const secondsToNextRun = nextRun ? Math.max(0, Math.floor((nextRun.getTime() - now) / 1000)) : null;
 
     const autopilot = getAutopilotState();
     const latestRunMetrics = (recentExperiments[0]?.metricsJson ?? {}) as {
@@ -83,10 +115,12 @@ export async function GET() {
 
     // Состав вселенной: UI объясняет, какие пары система выбрала сама и почему.
     // Ошибку скана не роняем — статусный экран важнее пустой строки отбора.
+    // Сканировать OKX при каждом поллинге статуса нельзя: это ~33 запроса к бирже
+    // на каждое обращение read-only-эндпоинта, поэтому скан здесь запрещён.
     let activeUniverse: UniverseMember[] = [];
     let universeSource: ActiveUniverse["source"] | "none" = "none";
     try {
-      const loaded = await loadActiveUniverse();
+      const loaded = await loadActiveUniverse({ allowScan: false });
       activeUniverse = loaded.universe;
       universeSource = loaded.source;
     } catch {
@@ -109,17 +143,19 @@ export async function GET() {
       autopilot: {
         enabled: autopilot.enabled,
         cyclesCompleted: autopilot.cyclesCompleted,
-        retrainsCompleted: autopilot.retrainsCompleted,
+        cyclesFailed: autopilot.cyclesFailed,
+        lastCycleAt: autopilot.lastCycleAt,
+        lastError: autopilot.lastError,
       },
       scheduler: {
         lastRunTime: lastRun ? lastRun.toISOString() : null,
         nextRunTime: nextRun ? nextRun.toISOString() : null,
         secondsToNextRun,
-        intervalMinutes: 15,
+        intervalMinutes: CYCLE_INTERVAL_MIN,
       },
       stats: {
-        totalAssetsTracked: assetsList.length,
-        activeHypothesesCount: activeHypotheses.length,
+        totalAssetsTracked: assetsRows[0]?.total ?? assetsList.length,
+        activeHypothesesCount: activeRows[0]?.total ?? activeHypotheses.length,
         totalResolved,
         hits,
         misses,

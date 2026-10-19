@@ -17,10 +17,23 @@ export async function POST(req: Request) {
       );
     }
 
-    await db.execute(
-      sql`TRUNCATE TABLE ai_analyses, forecasts, hypotheses, combinations, signal_features, experiment_runs, data_quality_logs, candles RESTART IDENTITY CASCADE`
-    );
-    await db.delete(learningWeights);
+    // Одна транзакция: раньше TRUNCATE и удаление весов шли отдельными
+    // запросами, и сбой между ними оставлял журнал пустым при старых весах —
+    // то есть систему, которая «помнит» статистику по данным, которых нет.
+    //
+    // `oi_snapshots` добавлен в список: это такой же журнал наблюдений, и его
+    // сохранение после очистки давало историю, не связанную ни с одним циклом.
+    //
+    // ВНИМАНИЕ: операция уничтожает бумажный журнал — единственный результат
+    // работы системы. Поэтому она требует { confirm: true } в теле запроса.
+    await db.transaction(async (tx) => {
+      await tx.execute(
+        sql`TRUNCATE TABLE ai_analyses, forecasts, hypotheses, combinations, signal_features, experiment_runs, data_quality_logs, oi_snapshots, candles RESTART IDENTITY CASCADE`
+      );
+      await tx.delete(learningWeights);
+    });
+    // Кэш весов в памяти процесса сбрасывается после успешной транзакции.
+    learningLoop.invalidateCache();
     await learningLoop.ensureInitialized();
 
     return NextResponse.json({

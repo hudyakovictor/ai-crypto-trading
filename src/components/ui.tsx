@@ -146,67 +146,6 @@ export function Tip({
   return <div className={className}>{children}</div>;
 }
 
-/* eslint-disable @typescript-eslint/no-unused-vars */
-function TipLegacyNeverUsed({
-  label,
-  children,
-  className = "",
-  align = "center",
-  side = "top",
-}: {
-  label: React.ReactNode;
-  children: React.ReactNode;
-  className?: string;
-  align?: "center" | "start" | "end";
-  side?: "top" | "right";
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  const [pos, setPos] = useState<{ x: number; y: number; below: boolean } | null>(null);
-
-  const show = useCallback(() => {
-    const el = ref.current;
-    if (!el) return;
-    const r = el.getBoundingClientRect();
-    if (side === "right") {
-      setPos({ x: r.right + 10, y: r.top + r.height / 2, below: false });
-      return;
-    }
-    const cx = align === "center" ? r.left + r.width / 2 : align === "start" ? r.left : r.right;
-    setPos({ x: cx, y: r.top, below: r.top < 130 });
-  }, [align, side]);
-
-  const transform =
-    side === "right"
-      ? "translate(0, -50%)"
-      : `translate(${align === "center" ? "-50%" : align === "start" ? "0" : "-100%"}, ${pos?.below ? "0" : "-100%"})`;
-
-  return (
-    <div
-      ref={ref}
-      className={`relative ${className}`}
-      onMouseEnter={show}
-      onMouseLeave={() => setPos(null)}
-      onFocus={show}
-      onBlur={() => setPos(null)}
-    >
-      {children}
-      {pos && (
-        <div
-          role="tooltip"
-          className="pointer-events-none fixed z-[90] w-max max-w-[280px] rounded-md border border-border-strong bg-surface3 px-2.5 py-2 text-left shadow-[0_8px_28px_rgba(0,0,0,0.55)] anim-tick"
-          style={{
-            left: pos.x,
-            top: side === "right" ? pos.y : pos.below ? pos.y + 22 : pos.y - 8,
-            transform,
-          }}
-        >
-          {label}
-        </div>
-      )}
-    </div>
-  );
-}
-
 export function TipRow({ k, v, tone }: { k: string; v: React.ReactNode; tone?: Tone }) {
   return (
     <div className="flex items-center justify-between gap-6 py-[1px] text-[13px]">

@@ -830,6 +830,12 @@ function WalkForwardCompact({ wf }: { wf: ApiState<WalkForwardResponse> }) {
 
 /* ============================= Overview root ============================= */
 
+/**
+ * Порог выборки, ниже которого hit rate — шум, а не оценка преимущества.
+ * Используется, чтобы честно подписывать «мало данных» вместо выводов.
+ */
+const MIN_SAMPLES_FOR_INFERENCE = 30;
+
 export function OverviewView({
   status,
   heatmap,
@@ -866,9 +872,13 @@ export function OverviewView({
   );
   const topAssetSymbol = heroSymbols[0] ?? null;
   const universe = status.data?.universe ?? [];
+  // null = данных нет. Раньше вместо null подставлялись 0 и 0.25, и экран
+  // уверенно показывал «hit rate 0%» и «Brier как у монетки» на пустой базе.
+  const hitRate = stats?.empiricalHitRate ?? null;
+  const decided = (stats?.hits ?? 0) + (stats?.misses ?? 0);
   const hitTone =
-    (stats?.empiricalHitRate ?? 0) >= 55 ? "var(--green)" : (stats?.empiricalHitRate ?? 0) >= 48 ? "var(--amber)" : "var(--red)";
-  const brier = stats?.averageBrierScore ?? 0.25;
+    hitRate === null ? "var(--text-3)" : hitRate >= 55 ? "var(--green)" : hitRate >= 48 ? "var(--amber)" : "var(--red)";
+  const brier = stats?.averageBrierScore ?? null;
   const lastRun = status.data?.scheduler.lastRunTime ?? null;
 
   return (
@@ -915,13 +925,18 @@ export function OverviewView({
       <div className="grid grid-cols-2 gap-px overflow-hidden rounded-[10px] border border-border bg-border lg:grid-cols-4 anim-fade-up [&>*]:bg-surface" style={{ animationDelay: "40ms" }}>
         <StatCell
           label="Hit Rate · эмпирический"
-          value={stats ? `${stats.empiricalHitRate.toFixed(1)}%` : "—"}
-          tone={stats ? hitTone : undefined}
+          value={hitRate === null ? "нет данных" : `${hitRate.toFixed(1)}%`}
+          tone={hitRate === null ? undefined : hitTone}
           tip={
             <div>
               <TipRow k="Hits / Misses" v={`${stats?.hits ?? 0} / ${stats?.misses ?? 0}`} />
               <TipRow k="Ambiguous" v={String(stats?.ambiguous ?? 0)} />
               <TipRow k="Всего разрешено" v={String(stats?.totalResolved ?? 0)} />
+              {/* Хитрейт по hit/(hit+miss): ambiguous — пропуск данных, не исход */}
+              <TipRow k="Знаменатель" v={`${decided} решённых`} />
+              {decided > 0 && decided < MIN_SAMPLES_FOR_INFERENCE && (
+                <TipRow k="Осторожно" v={`мало данных (< ${MIN_SAMPLES_FOR_INFERENCE})`} />
+              )}
             </div>
           }
         >
@@ -929,17 +944,28 @@ export function OverviewView({
         </StatCell>
         <StatCell
           label="Brier Score · калибровка"
-          value={stats ? stats.averageBrierScore.toFixed(4) : "—"}
-          tone={brier <= 0.2 ? "var(--green)" : brier <= 0.26 ? "var(--amber)" : "var(--red)"}
+          value={brier === null ? "нет данных" : brier.toFixed(4)}
+          tone={brier === null ? undefined : brier <= 0.2 ? "var(--green)" : brier <= 0.26 ? "var(--amber)" : "var(--red)"}
           tip={
             <div>
               <TipRow k="Идеал" v="0.0000" />
               <TipRow k="Случайный уровень" v="0.2500" />
-              <TipRow k="Оценка" v={brier <= 0.2 ? "калибровка хорошая" : brier <= 0.26 ? "приемлемо" : "нужно дообучение"} />
+              <TipRow
+                k="Оценка"
+                v={
+                  brier === null
+                    ? "ещё нет разрешённых исходов"
+                    : brier <= 0.2
+                      ? "калибровка хорошая"
+                      : brier <= 0.26
+                        ? "приемлемо"
+                        : "нужно дообучение"
+                }
+              />
             </div>
           }
         >
-          <span className="text-[13px] text-text-3">{brier <= 0.2 ? "точно" : "обучается"}</span>
+          <span className="text-[13px] text-text-3">{brier === null ? "нет исходов" : brier <= 0.2 ? "точно" : "обучается"}</span>
         </StatCell>
         <StatCell
           label="Активные гипотезы"

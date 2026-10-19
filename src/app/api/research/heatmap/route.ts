@@ -21,7 +21,7 @@ export async function GET() {
   const started = Date.now();
   try {
     const [{ universe, source }, { tickers, isLive }] = await Promise.all([
-      loadActiveUniverse(),
+      loadActiveUniverse({ allowScan: false }),
       okxClient.getTickers(),
     ]);
 

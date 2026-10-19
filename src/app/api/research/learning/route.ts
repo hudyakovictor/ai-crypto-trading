@@ -32,6 +32,9 @@ export async function GET() {
       wrong_horizon: 0,
       regime_mismatch: 0,
       cost_drag: 0,
+      // Разрыв данных: прогноз не удалось разрешить по реальной цене (нет
+      // тикера/свечей или разрешение пришло сильно позже горизонта).
+      data_gap: 0,
     };
 
     for (const fc of resolvedForecasts) {
@@ -83,10 +86,15 @@ export async function GET() {
       errorDistribution,
       calibrationBins,
       totalAccumulatedSamples: weightsList.reduce((acc, w) => acc + w.totalSamples, 0),
+      // null, если ни одна категория ещё не видела исходов. Прежнее "0.2500"
+      // показывало «калибровка как у монетки» на полностью пустой базе.
       averageBrierScore:
-        weightsList.length > 0
-          ? (weightsList.reduce((acc, w) => acc + w.brierScore, 0) / weightsList.length).toFixed(4)
-          : "0.2500",
+        weightsList.some((w) => w.totalSamples > 0)
+          ? (
+              weightsList.reduce((acc, w) => acc + w.brierScore, 0) /
+              Math.max(1, weightsList.filter((w) => w.totalSamples > 0).length)
+            ).toFixed(4)
+          : null,
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Failed to load learning data";
@@ -96,41 +104,29 @@ export async function GET() {
 
 export async function POST() {
   try {
-    // Retrain on all resolved forecasts in the database
-    const resolvedForecasts = await db
-      .select()
-      .from(forecasts)
-      .where(eq(forecasts.status, "resolved"));
-
-    const hypList = await db.select().from(hypotheses);
-    const hypMap = new Map(hypList.map((h) => [h.id, h]));
-
-    const eventsForLearning: {
-      categories: string[];
-      outcome: "hit" | "miss" | "ambiguous" | "expired";
-      realizedReturn: number;
-    }[] = [];
-
-    for (const fc of resolvedForecasts) {
-      if (!fc.hypothesisId) continue;
-      const hyp = hypMap.get(fc.hypothesisId);
-      if (hyp && Array.isArray(hyp.categoriesJson)) {
-        eventsForLearning.push({
-          categories: hyp.categoriesJson as string[],
-          outcome: (fc.outcome as "hit" | "miss" | "ambiguous" | "expired") || "hit",
-          realizedReturn: fc.realizedReturnNet || 0,
-        });
-      }
-    }
-
-    const { updatedCount, averageBrier } = await learningLoop.updateFromOutcomes(eventsForLearning);
+    // Пересчёт весов по ВСЕЙ накопленной истории одним идемпотентным вызовом.
+    // Раньше здесь собирался массив всех разрешённых прогнозов и передавался в
+    // инкрементальный обновлятор: каждый POST заново «засчитывал» одни и те же
+    // исходы, раздувая totalSamples и убивая байесовское сглаживание.
+    // Кроме того, пустой `outcome` приводился к "hit" (`|| "hit"`), то есть
+    // brak-данные становились подтверждением гипотез.
+    const result = await learningLoop.rebuildFromHistory();
+    // Ручной пересчёт оставляет след в журнале прогонов: иначе действие
+    // пользователя меняло веса системы бесследно.
+    await learningLoop.logRebuild(result, "manual_learning_rebuild");
     const updatedWeights = await db.select().from(learningWeights);
 
     return NextResponse.json({
       success: true,
-      message: `Successfully learned on ${eventsForLearning.length} accumulated forecast outcomes! Updated ${updatedCount} category weights.`,
-      retrainedCount: eventsForLearning.length,
-      averageBrierScore: averageBrier,
+      message:
+        result.events === 0
+          ? "Обучать пока не на чем: в журнале нет разрешённых исходов (hit/miss)."
+          : `Веса пересчитаны по ${result.events} исходам; затронуто категорий: ${result.categories}.`,
+      retrainedCount: result.events,
+      averageBrierScore: result.averageBrier,
+      baseHitRate: result.baseHitRate,
+      categoriesUpdated: result.categories,
+      rebuiltAt: result.updatedAt,
       updatedWeights,
     });
   } catch (err: unknown) {

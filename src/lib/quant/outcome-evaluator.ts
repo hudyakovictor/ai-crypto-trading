@@ -1,4 +1,11 @@
 import { ForecastOutcome, ErrorType, OKXCandle } from "../types";
+import {
+  BAR_MS,
+  ERROR_THRESHOLDS,
+  OUTCOME_BAR_PCT,
+  RANGE_BAR_PCT,
+  roundTripCostPct,
+} from "./outcome-contract";
 
 export interface ForecastRecord {
   id: number;
@@ -28,25 +35,48 @@ export interface OutcomeResolution {
   realizedReturnNet: number; // %
   errorType: ErrorType;
   resolvedAt: Date;
+  /** Сколько подтверждённых баров окна [fixedAt, resolveAt] реально участвовало в расчёте. */
+  barsUsed: number;
+  /** Причина, по которой исход нельзя считать содержательным (пусто, если исход нормальный). */
+  caveat: "" | "no_bars_in_window" | "unconfirmed_last_bar";
 }
 
+/**
+ * Сверка записанного прогноза с тем, что реально произошло.
+ *
+ * Три исправления относительно прежней версии, каждое — про честность метки,
+ * которой потом обучается система:
+ *
+ *  1. Окно свечей ограничено СВЕРХУ горизонтом прогноза. Раньше фильтр был
+ *     только нижний (`timestamp >= fixedAt - 15m`), поэтому в MFE/MAE попадали
+ *     бары после горизонта и текущий незакрытый бар: hit засчитывался за
+ *     движение, которого на горизонте ещё не было (look-ahead).
+ *  2. Пороги исхода и таксономии ошибок берутся из outcome-contract, а не из
+ *     локальных литералов, и выражены в долях бара.
+ *  3. Возвращается `barsUsed`/`caveat`: разрешение по нулю баров окна больше
+ *     не выглядит как содержательный промах сигнала.
+ */
 export class OutcomeEvaluator {
-  /**
-   * Evaluates a forecast against observed candles between fixedAt and resolveAt.
-   */
   evaluate(forecast: ForecastRecord, currentPrice: number, candles: OKXCandle[]): OutcomeResolution {
     const { entryPrice, direction, costsBps, slippageBps, fundingDragBps } = forecast;
-    const totalCostsPct = ((costsBps + slippageBps + fundingDragBps) * 2) / 10000; // Round-trip costs in %
+    const roundTripPct = roundTripCostPct(costsBps, slippageBps, fundingDragBps);
 
-    // Filter candles that occurred during or after the forecast period
     const fixedTime = new Date(forecast.fixedAt).getTime();
     const resolveTime = new Date(forecast.resolveAt).getTime();
+    const now = Date.now();
 
-    const periodCandles = candles.filter((c) => c.timestamp >= fixedTime - 15 * 60 * 1000);
+    // Бары, ЦЕЛИКОМ лежащие внутри окна прогноза. Бар, который к моменту
+    // разрешения ещё не закрылся, в экстремумы не берётся: его high/low
+    // продолжат расти, и это завышало бы MFE.
+    const periodCandles = candles.filter(
+      (c) => c.timestamp >= fixedTime && c.timestamp + BAR_MS <= resolveTime && c.timestamp + BAR_MS <= now
+    );
+    const lastBarUnconfirmed = candles.some(
+      (c) => c.timestamp >= fixedTime && c.timestamp <= resolveTime && c.timestamp + BAR_MS > now
+    );
 
     let maxPrice = currentPrice;
     let minPrice = currentPrice;
-
     if (periodCandles.length > 0) {
       maxPrice = Math.max(...periodCandles.map((c) => c.high), currentPrice);
       minPrice = Math.min(...periodCandles.map((c) => c.low), currentPrice);
@@ -59,50 +89,29 @@ export class OutcomeEvaluator {
     let mae = 0;
     let rawReturn = 0;
     let isHit = false;
-    let isMiss = false;
 
     if (direction === "UP") {
       mfe = ((maxPrice - entryPrice) / entryPrice) * 100;
       mae = ((entryPrice - minPrice) / entryPrice) * 100;
       rawReturn = ((currentPrice - entryPrice) / entryPrice) * 100;
-      // Hit if reached +0.4% or currentPrice > entryPrice with positive return after costs
-      isHit = rawReturn > totalCostsPct * 100 && mfe > 0.35;
-      isMiss = !isHit;
+      isHit = rawReturn > roundTripPct && mfe >= OUTCOME_BAR_PCT;
     } else if (direction === "DOWN") {
       mfe = ((entryPrice - minPrice) / entryPrice) * 100;
       mae = ((maxPrice - entryPrice) / entryPrice) * 100;
       rawReturn = ((entryPrice - currentPrice) / entryPrice) * 100;
-      isHit = rawReturn > totalCostsPct * 100 && mfe > 0.35;
-      isMiss = !isHit;
+      isHit = rawReturn > roundTripPct && mfe >= OUTCOME_BAR_PCT;
     } else {
-      // RANGE / VOLATILITY
+      // RANGE / VOLATILITY / FLAT: проверяем, что цена осталась в пределах бара.
       const movePct = (Math.abs(currentPrice - entryPrice) / entryPrice) * 100;
       mfe = movePct;
       mae = 0;
-      rawReturn = (0.3 - movePct);
-      isHit = movePct <= 0.45;
-      isMiss = !isHit;
+      rawReturn = RANGE_BAR_PCT - movePct;
+      isHit = movePct <= RANGE_BAR_PCT;
     }
 
-    const realizedReturnNet = rawReturn - (totalCostsPct * 100);
-
-    let outcome: ForecastOutcome = isHit ? "hit" : isMiss ? "miss" : "ambiguous";
-    let errorType: ErrorType = "none";
-
-    if (outcome === "miss") {
-      // Classify quantitative error type
-      if (rawReturn > 0 && realizedReturnNet <= 0) {
-        errorType = "cost_drag";
-      } else if (mfe > 0.4 && rawReturn < -0.2) {
-        errorType = "wrong_horizon"; // Hit target during life, then reversed
-      } else if (rawReturn < -0.7) {
-        errorType = "wrong_sign"; // Strong counter-trend move
-      } else if (Math.abs(rawReturn) < 0.15) {
-        errorType = "weak_signal"; // Flat market, insufficient momentum
-      } else {
-        errorType = "regime_mismatch";
-      }
-    }
+    const realizedReturnNet = rawReturn - roundTripPct;
+    const outcome: ForecastOutcome = isHit ? "hit" : "miss";
+    const errorType: ErrorType = outcome === "hit" ? "none" : classifyError(rawReturn, realizedReturnNet, mfe);
 
     return {
       forecastId: forecast.id,
@@ -113,8 +122,20 @@ export class OutcomeEvaluator {
       realizedReturnNet,
       errorType,
       resolvedAt: new Date(),
+      barsUsed: periodCandles.length,
+      caveat: periodCandles.length === 0 ? "no_bars_in_window" : lastBarUnconfirmed ? "unconfirmed_last_bar" : "",
     };
   }
+}
+
+/** Тип ошибки — в долях бара исхода, а не в абсолютных процентах. */
+function classifyError(rawReturn: number, netReturn: number, mfe: number): ErrorType {
+  const bar = OUTCOME_BAR_PCT;
+  if (rawReturn > 0 && netReturn <= 0) return "cost_drag";
+  if (mfe >= bar && rawReturn <= -bar * ERROR_THRESHOLDS.wrongHorizonReversalPctOfBar) return "wrong_horizon";
+  if (rawReturn <= -bar * ERROR_THRESHOLDS.wrongSignPctOfBar) return "wrong_sign";
+  if (Math.abs(rawReturn) < bar * ERROR_THRESHOLDS.weakSignalPctOfBar) return "weak_signal";
+  return "regime_mismatch";
 }
 
 export const outcomeEvaluator = new OutcomeEvaluator();

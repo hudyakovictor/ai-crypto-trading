@@ -102,10 +102,15 @@ export const CATEGORY_RU: Record<string, string> = {
 export const REGIME_RU: Record<string, string> = {
   TRENDING_BULL: "Восходящий тренд",
   TRENDING_BEAR: "Нисходящий тренд",
+  RANGING: "Боковик",
+  VOLATILE: "Высокая волатильность",
   HIGH_VOLATILITY_CHOP: "Высоковолатильный пил",
   LOW_VOLATILITY_SQUEEZE: "Сжатие волатильности",
   LIQUIDITY_CRUNCH: "Дефицит ликвидности",
   NEUTRAL_CONSOLIDATION: "Нейтральная консолидация",
+  // Строка-заполнитель для записей, у которых нет рыночного режима
+  // (например, ручной пересчёт весов обучения).
+  NO_REGIME: "—",
 };
 
 export const ERROR_RU: Record<string, { label: string; fix: string }> = {

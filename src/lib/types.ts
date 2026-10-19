@@ -10,11 +10,20 @@ export type MarketRegime =
 
 export type MacroRegime = "BULLISH" | "BEARISH" | "NEUTRAL" | "UNSTABLE";
 
+/**
+ * Рыночный режим → макро-режим.
+ *
+ * ВАЖНО: раньше TRENDING_BEAR попадал в одну ветку с TRENDING_BULL и возвращал
+ * "BULLISH". Любой фильтр или подсказка модели, построенные на macroRegime,
+ * получали «бычий рынок» на медвежьем тренде — то есть систематически
+ * переворачивали знак контекста. Медвежий тренд теперь даёт BEARISH.
+ */
 export function toMacroRegime(marketRegime: MarketRegime): MacroRegime {
   switch (marketRegime) {
     case "TRENDING_BULL":
-    case "TRENDING_BEAR":
       return "BULLISH";
+    case "TRENDING_BEAR":
+      return "BEARISH";
     case "RANGING":
       return "NEUTRAL";
     case "VOLATILE":

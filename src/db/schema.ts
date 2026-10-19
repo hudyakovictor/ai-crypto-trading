@@ -1,4 +1,16 @@
-import { pgTable, text, serial, timestamp, doublePrecision, integer, boolean, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, timestamp, doublePrecision, integer, boolean, jsonb, index } from "drizzle-orm/pg-core";
+
+/**
+ * СХЕМА БУМАЖНОГО ЖУРНАЛА ЛАБОРАТОРИИ.
+ *
+ * Индексы объявлены здесь, но применяются к живой базе только командой
+ * `npx drizzle-kit push` (каталога миграций в репозитории нет — см. аудит
+ * F-043). Все индексы НЕуникальные и только добавляются: push не переписывает
+ * данные и не может сломать существующие строки. Без них самые частые запросы
+ * (созревшие прогнозы, активные гипотезы, окно свечей, последние признаки)
+ * превращаются в полное сканирование таблиц каждые 15 минут и каждые 20 секунд
+ * из каждого открытого дашборда.
+ */
 
 export const assets = pgTable("assets", {
   id: serial("id").primaryKey(),
@@ -29,7 +41,12 @@ export const candles = pgTable("candles", {
   volCcy: doublePrecision("vol_ccy").notNull().default(0), // Quote volume
   confirmed: boolean("confirmed").notNull().default(true),
   createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+},
+  (t) => [
+    // Чтение окна свечей по активу и таймфрейму + «последний сохранённый бар».
+    index("idx_candles_symbol_tf_ts").on(t.symbol, t.timeframe, t.timestamp),
+  ],
+);
 
 export const signalFeatures = pgTable("signal_features", {
   id: serial("id").primaryKey(),
@@ -44,7 +61,13 @@ export const signalFeatures = pgTable("signal_features", {
   supportCount: integer("support_count").notNull().default(100),
   timestamp: timestamp("timestamp").defaultNow().notNull(),
   metadataJson: jsonb("metadata_json"),
-});
+},
+  (t) => [
+    // Тепловая карта и walk-forward читают признаки по активу и по категории.
+    index("idx_signal_features_symbol_ts").on(t.symbol, t.timestamp),
+    index("idx_signal_features_category_ts").on(t.category, t.timestamp),
+  ],
+);
 
 export const combinations = pgTable("combinations", {
   id: serial("id").primaryKey(),
@@ -65,7 +88,12 @@ export const combinations = pgTable("combinations", {
   status: text("status").notNull().default("candidate"), // candidate, promising, validated, rejected
   failurePatternsJson: jsonb("failure_patterns_json"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+},
+  (t) => [
+    index("idx_combinations_status_created").on(t.status, t.createdAt),
+    index("idx_combinations_created").on(t.createdAt),
+  ],
+);
 
 export const hypotheses = pgTable("hypotheses", {
   id: serial("id").primaryKey(),
@@ -87,7 +115,13 @@ export const hypotheses = pgTable("hypotheses", {
   uncertainty: doublePrecision("uncertainty").notNull().default(0.35),
   status: text("status").notNull().default("active"), // active, fulfilled, invalidated, expired
   createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+},
+  (t) => [
+    // «Активные гипотезы» и журнал по активу — самые частые выборки.
+    index("idx_hypotheses_status_created").on(t.status, t.createdAt),
+    index("idx_hypotheses_asset_created").on(t.asset, t.createdAt),
+  ],
+);
 
 export const forecasts = pgTable("forecasts", {
   id: serial("id").primaryKey(),
@@ -115,7 +149,16 @@ export const forecasts = pgTable("forecasts", {
   errorType: text("error_type"), // weak_signal, wrong_sign, wrong_horizon, regime_mismatch, cost_drag, none
   resolvedAt: timestamp("resolved_at"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+},
+  (t) => [
+    // Главный рабочий запрос цикла: «созревшие к разрешению прогнозы».
+    index("idx_forecasts_status_resolve_at").on(t.status, t.resolveAt),
+    // Агрегаты исходов и LEFT JOIN журнала.
+    index("idx_forecasts_status_outcome").on(t.status, t.outcome),
+    index("idx_forecasts_hypothesis_id").on(t.hypothesisId),
+    index("idx_forecasts_created").on(t.createdAt),
+  ],
+);
 
 export const learningWeights = pgTable("learning_weights", {
   id: serial("id").primaryKey(),
@@ -143,7 +186,12 @@ export const experimentRuns = pgTable("experiment_runs", {
   logSummary: text("log_summary").notNull(),
   metricsJson: jsonb("metrics_json"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+},
+  (t) => [
+    index("idx_experiment_runs_created").on(t.createdAt),
+    index("idx_experiment_runs_type_created").on(t.runType, t.createdAt),
+  ],
+);
 
 export const dataQualityLogs = pgTable("data_quality_logs", {
   id: serial("id").primaryKey(),
@@ -153,7 +201,9 @@ export const dataQualityLogs = pgTable("data_quality_logs", {
   latencyMs: integer("latency_ms").notNull().default(0),
   details: text("details"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+},
+  (t) => [index("idx_data_quality_logs_created").on(t.createdAt)],
+);
 
 export const oiSnapshots = pgTable("oi_snapshots", {
   id: serial("id").primaryKey(),
@@ -164,7 +214,9 @@ export const oiSnapshots = pgTable("oi_snapshots", {
   regime: text("regime").notNull().default("NEUTRAL_CONSOLIDATION"),
   liquidationGravityScore: doublePrecision("liquidation_gravity_score").notNull().default(0),
   createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+},
+  (t) => [index("idx_oi_snapshots_symbol_ts").on(t.symbol, t.timestamp)],
+);
 
 export const aiAnalyses = pgTable("ai_analyses", {
   id: serial("id").primaryKey(),
@@ -175,7 +227,12 @@ export const aiAnalyses = pgTable("ai_analyses", {
   model: text("model"),
   contextJson: jsonb("context_json"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+},
+  (t) => [
+    index("idx_ai_analyses_kind_created").on(t.kind, t.createdAt),
+    index("idx_ai_analyses_created").on(t.createdAt),
+  ],
+);
 
 export const aiProviderSettings = pgTable("ai_provider_settings", {
   id: serial("id").primaryKey(),

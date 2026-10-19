@@ -107,34 +107,27 @@ function ShortcutsOverlay({ open, onClose }: { open: boolean; onClose: () => voi
 /* ---------------- First-run initializer ---------------- */
 
 function InitScreen({ onReady }: { onReady: () => void }) {
-  const [phase, setPhase] = useState<"idle" | "seeding" | "cycling" | "error">("idle");
-  const [err, setErr] = useState("");
+  // null — идёт первый цикл; строка — текст аварии. Отдельная фаза "seeding"
+  // удалена вместе с демо-сидингом выдуманной истории.
+  const [err, setErr] = useState<string | null>(null);
 
   const init = useCallback(async () => {
-    setPhase("seeding");
-    setErr("");
-    try {
-      await postJson("/api/research/seed");
-    } catch (e) {
-      // Seed may report "already populated" as success; hard errors surface here
-      console.warn("seed note:", e);
-    }
-    setPhase("cycling");
     try {
       await postJson("/api/research/cycle", { isManual: true });
       toast("ok", "Лаборатория инициализирована", "Первый цикл завершён: связки оценены, отбор решил планировщик.");
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Ошибка запуска цикла");
-      setPhase("error");
       return;
     }
     onReady();
   }, [onReady]);
 
   useEffect(() => {
+    // Запуск первого цикла при монтировании: setErr вызывается только после await,
+    // но правило react-hooks/set-state-in-effect не видит границу await внутри try/catch.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void init();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [init]);
 
   return (
     <div className="grid min-h-screen place-items-center">
@@ -145,14 +138,17 @@ function InitScreen({ onReady }: { onReady: () => void }) {
         <div>
           <h1 className="text-[15px] font-semibold text-text-1">OKX Quant Hypotheses Lab</h1>
           <p className="mt-1 text-[14px] leading-relaxed text-text-3">
-            Поднимаем исследовательскую инфраструктуру: сиды истории, веса обучения и первый цикл — вселенная, связки, отбор.
+            Поднимаем исследовательскую инфраструктуру: первый цикл на живых котировках OKX — вселенная, 15 категорий сигналов, связки, отбор планировщика.
           </p>
         </div>
-        {phase === "error" ? (
+        {err !== null ? (
           <>
             <p className="num text-[13px] text-bear">{err}</p>
             <button
-              onClick={() => void init()}
+              onClick={() => {
+                setErr(null);
+                void init();
+              }}
               className="hoverable pressable rounded-md border border-[rgba(91,141,238,0.5)] bg-accent px-4 py-2 text-[14px] font-semibold text-white"
             >
               Повторить инициализацию
@@ -162,7 +158,7 @@ function InitScreen({ onReady }: { onReady: () => void }) {
           <div className="flex flex-col items-center gap-2">
             <span className="size-4 animate-spin rounded-full border-2 border-white/20 border-t-accent" />
             <span className="num text-[13px] text-text-3">
-              {phase === "seeding" ? "Восстановление истории гипотез…" : "Первый цикл: OKX → вселенная → связки → отбор планировщика…"}
+              Первый цикл: OKX → вселенная → связки → отбор планировщика…
             </span>
           </div>
         )}
@@ -181,34 +177,34 @@ export function AppShell() {
   const [clearOpen, setClearOpen] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [booted, setBooted] = useState(false);
-  const [initChecked, setInitChecked] = useState(false);
   /** Актив, по которому экран «Комбинации» считает связки. Якорь вселенной всегда валиден. */
   const [asset, setAsset] = useState<string>("BTC-USDT");
-  const needsInitRef = useRef(false);
 
   const status = useApi<import("@/lib/ui-types").StatusResponse>("/api/research/status", 20000);
-  const heatmap = useApi<import("@/lib/ui-types").HeatmapResponse>(booted ? "/api/research/heatmap" : null, 90000);
-  const combos = useApi<import("@/lib/ui-types").CombinationsResponse>(
-    booted ? `/api/research/combinations?symbol=${encodeURIComponent(asset)}` : null
-  );
-  const ledger = useApi<import("@/lib/ui-types").LedgerResponse>(booted ? "/api/research/ledger" : null, 30000);
-  const learning = useApi<import("@/lib/ui-types").LearningResponse>(booted ? "/api/research/learning" : null, 45000);
-  const walkforward = useApi<import("@/lib/ui-types").WalkForwardResponse>(booted ? "/api/research/walkforward" : null, 60000);
-  const edge = useApi<import("@/lib/ui-types").EdgeResponse>(booted ? "/api/research/edge" : null, 45000);
-  const ai = useApi<import("@/lib/ui-types").AiStatusResponse>("/api/research/ai");
+  // Boot gate: нужна ли лаборатории первая инициализация. Вычисляется из
+  // ответа /status, а не хранится в ref + эффект: чтение ref во время рендера
+  // и setState в эффекте давали лишний рендер и предупреждения линтера.
+  const bootStats = status.data?.stats;
+  const hasInitializedLab = (status.data?.assets?.length ?? 0) > 0;
+  const labIsEmpty =
+    !status.loading &&
+    (!status.data ||
+      (!hasInitializedLab &&
+        (bootStats?.totalResolved ?? 0) === 0 &&
+        (bootStats?.activeHypothesesCount ?? 0) === 0));
+  const showInit = labIsEmpty && !booted;
+  /** Тяжёлые экраны опрашиваем только когда статус загружен и лаборатория поднята. */
+  const labReady = Boolean(status.data) && !showInit;
 
-  // Boot gate: decide whether the lab needs first-run seeding
-  useEffect(() => {
-    if (initChecked || status.loading) return;
-    setInitChecked(true);
-    const stats = status.data?.stats;
-    // Assets survive a history reset, so they also mark the lab as initialized.
-    // Without this guard every page reload after reset would seed the demo history again.
-    const hasInitializedLab = (status.data?.assets?.length ?? 0) > 0;
-    const empty = !status.data || (!hasInitializedLab && (stats?.totalResolved ?? 0) === 0 && (stats?.activeHypothesesCount ?? 0) === 0);
-    needsInitRef.current = empty;
-    if (!empty) setBooted(true);
-  }, [status, initChecked]);
+  const heatmap = useApi<import("@/lib/ui-types").HeatmapResponse>(labReady ? "/api/research/heatmap" : null, 90000);
+  const combos = useApi<import("@/lib/ui-types").CombinationsResponse>(
+    labReady ? `/api/research/combinations?symbol=${encodeURIComponent(asset)}` : null
+  );
+  const ledger = useApi<import("@/lib/ui-types").LedgerResponse>(labReady ? "/api/research/ledger" : null, 30000);
+  const learning = useApi<import("@/lib/ui-types").LearningResponse>(labReady ? "/api/research/learning" : null, 45000);
+  const walkforward = useApi<import("@/lib/ui-types").WalkForwardResponse>(labReady ? "/api/research/walkforward" : null, 60000);
+  const edge = useApi<import("@/lib/ui-types").EdgeResponse>(labReady ? "/api/research/edge" : null, 45000);
+  const ai = useApi<import("@/lib/ui-types").AiStatusResponse>("/api/research/ai");
 
   const refreshAll = useCallback(() => {
     void Promise.allSettled([
@@ -229,13 +225,17 @@ export function AppShell() {
     try {
       const r = await postJson<{ result: CycleApiResult }>("/api/research/cycle", { isManual: true });
       const res = r.result;
+      if (res.skipped) {
+        toast("info", "Цикл пропущен", res.summary);
+        return;
+      }
       const universeNote = res.universe?.length
         ? `вселенная ${res.trackedCount ?? res.universe.length} пар`
         : `${res.combinationsGenerated} связок`;
       const d = res.planner;
       toast(
         "ok",
-        `Цикл завершён · ${res.marketRegime.replace(/_/g, " ")}`,
+        `Цикл завершён · ${(res.marketRegime ?? "режим не определён").replace(/_/g, " ")}`,
         d
           ? `${universeNote} · ${d.mode === "ai" ? "решил ИИ" : d.mode === "fallback" ? "запасное правило" : "правило EVS"}: ${d.picks.length} из ${d.offered} кандидатов (потолок ${d.ceiling}) · ${res.latencyMs} ms`
           : `${universeNote} · ${res.combinationsGenerated} связок · ${res.hypothesesCreated} гипотез · ${res.latencyMs} ms`
@@ -262,30 +262,19 @@ export function AppShell() {
     }
   }, [refreshAll]);
 
+  // Countdown до следующего цикла. Запускает цикл СЕРВЕР (autopilot через
+  // instrumentation.ts): браузерный триггер удалён — он не срабатывал при
+  // скрытой вкладке и конфликтовал с серверным расписанием, порождая дубли.
+  // Отсчёт выводится из nextRunTime сервера и локальных часов, поэтому не
+  // «уезжает» между опросами статуса и не показывает выдуманные 15 минут,
+  // пока расписание неизвестно.
+  const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
-    runRef.current = () => {
-      if (!document.hidden) void runCycle();
-    };
-  }, [runCycle]);
-
-  // Countdown to next scheduled run — fires the autonomous cycle at zero
-  const [countdown, setCountdown] = useState(900);
-  const runRef = useRef<() => void>(() => {});
-  useEffect(() => {
-    setCountdown(status.data?.scheduler.secondsToNextRun ?? 900);
-  }, [status.data?.scheduler.secondsToNextRun, status.updatedAt]);
-  useEffect(() => {
-    const id = setInterval(() => {
-      setCountdown((c) => {
-        if (c <= 1) {
-          runRef.current();
-          return 900;
-        }
-        return c - 1;
-      });
-    }, 1000);
+    const id = setInterval(() => setNowMs(Date.now()), 1000);
     return () => clearInterval(id);
   }, []);
+  const nextRunAt = status.data?.scheduler.nextRunTime ?? null;
+  const countdown = nextRunAt ? Math.max(0, Math.round((new Date(nextRunAt).getTime() - nowMs) / 1000)) : null;
 
   // Global keyboard shortcuts
   useEffect(() => {
@@ -343,15 +332,10 @@ export function AppShell() {
   }, [view, status, heatmap, combos, ledger, learning, walkforward, edge, ai, asset, refreshAll]);
 
 
-  if (initChecked && needsInitRef.current && !booted) {
+  if (showInit) {
     return (
       <>
-        <InitScreen
-          onReady={() => {
-            setBooted(true);
-            needsInitRef.current = false;
-          }}
-        />
+        <InitScreen onReady={() => setBooted(true)} />
         <Toaster />
       </>
     );

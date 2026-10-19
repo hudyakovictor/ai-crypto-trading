@@ -67,9 +67,17 @@ export function SettingsDrawer({
   const [ceilingLimits, setCeilingLimits] = useState({ ceilingMin: 1, ceilingMax: 30 });
   const [policySaving, setPolicySaving] = useState(false);
 
+  // Сброс подтверждения «очистить историю» при открытии drawers: корректировка
+  // состояния во время рендера (официальный паттерн React) вместо setState в
+  // теле эффекта — так нет лишнего рендера и нет предупреждения линтера.
+  const [prevOpen, setPrevOpen] = useState(open);
+  if (open !== prevOpen) {
+    setPrevOpen(open);
+    if (open) setConfirmReset(false);
+  }
+
   useEffect(() => {
     if (!open) return;
-    setConfirmReset(false);
     (async () => {
       try {
         const [f, a, ai, pol] = await Promise.all([
@@ -400,7 +408,7 @@ export function SettingsDrawer({
                     <Bot className="size-4.5" style={{ color: ap?.enabled ? "var(--green)" : "var(--text-3)" }} strokeWidth={1.9} />
                     <div>
                       <h3 className="text-[14px] font-bold text-text-1">Автопилот исследований</h3>
-                      <p className="text-[13px] text-text-3">переобучение после каждого цикла, цикл ~раз в 15 минут</p>
+                      <p className="text-[13px] text-text-3">весы пересчитываются по всей накопленной истории каждый цикл; цикл ровно раз в 15 минут, стартует на сервере</p>
                     </div>
                   </div>
                   <button
@@ -421,8 +429,13 @@ export function SettingsDrawer({
                       <div className="text-[15px] font-bold text-text-1">{ap.cyclesCompleted}</div>
                     </div>
                     <div className="rounded-md border border-border bg-surface px-2 py-1.5">
-                      <div className="text-[12px] text-text-3">переобучений</div>
-                      <div className="text-[15px] font-bold text-text-1">{ap.retrainsCompleted}</div>
+                      <div className="text-[12px] text-text-3">сбоев</div>
+                      <div
+                        className="text-[15px] font-bold"
+                        style={{ color: ap.cyclesFailed > 0 ? "var(--amber)" : "var(--text-1)" }}
+                      >
+                        {ap.cyclesFailed}
+                      </div>
                     </div>
                     <div className="rounded-md border border-border bg-surface px-2 py-1.5">
                       <div className="text-[12px] text-text-3">статус</div>

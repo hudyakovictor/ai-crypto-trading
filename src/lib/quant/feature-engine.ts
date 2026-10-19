@@ -30,6 +30,50 @@ export interface FeatureEngineOutput {
   dataQualityScore: number;
 }
 
+/* ---------- Калибровка детектора режима ---------- */
+
+/** Сколько баров берём для реализованной волатильности (10 × 15м = 2.5 часа). */
+const VOL_WINDOW_BARS = 30;
+/** Баров 15m в году и корень из этого числа для annualization. */
+const BARS_PER_YEAR_15M = 365 * 24 * 4;
+const BARS_PER_YEAR_15M_SQRT = Math.sqrt(BARS_PER_YEAR_15M);
+/**
+ * Пороги годовой волатильности. Для крипты типичные уровни: 40–120% годовых.
+ * Прежние 0.08 / 0.02 делали VOLATILE почти всегда, а RANGING — никогда.
+ */
+const VOL_ANNUALIZED_HIGH = 1.2;
+const VOL_ANNUALIZED_LOW = 0.45;
+const VOL_ANNUALIZED_SQUEEZE = 0.3;
+/** Порог ADX, выше которого движение считается трендом. */
+const ADX_TREND_MIN = 25;
+/** Порог ADX, ниже которого рынок считается пилой. */
+const ADX_CHOP_MAX = 20;
+/** Минимальный разрыв +DI/-DI, чтобы говорить о направленности. */
+const DI_GAP_CHOP = 5;
+/** Во сколько раз полоса диапазона должна быть меньше среднего бара для «сжатия». */
+const SQUEEZE_BAND_ATR_RATIO = 2.5;
+/** Окно ADX/ATR: 14 баров по 15 минут = 3.5 часа. */
+const ADX_WINDOW = 14;
+/**
+ * Средний истинный диапазон ниже этой доли цены (1 bp на бар) — рынок «замёрз»:
+ * ADX на таких данных не измеряет ничего, поэтому режим определяется отдельно.
+ */
+const FROZEN_ATR_PCT = 0.0001;
+/**
+ * Минимальное чистое смещение цены за окно ADX, чтобы считать движение
+ * трендом (0.3% за 3.5 часа). Отсекает пилу с нулевым итогом.
+ */
+const TREND_MIN_DISPLACEMENT_PCT = 0.003;
+
+/* ---------- Калибровка деривативов ---------- */
+
+/** Базовая (нейтральная) ставка фандинга OKX: 0.01% за 8 часов. */
+const FUNDING_NEUTRAL_RATE = 0.0001;
+/** Множитель нормировки отклонения фандинга в [-1, 1]. */
+const FUNDING_SCORE_MULT = 4000;
+/** Порог нормированного скора, за которым у категории появляется направление. */
+const FUNDING_DIR_THRESHOLD = 0.2;
+
 export class FeatureEngine {
   private clip(val: number, min = -1, max = 1): number {
     if (isNaN(val)) return 0;
@@ -125,41 +169,147 @@ export class FeatureEngine {
     };
   }
 
+  /**
+   * Определение рыночного режима по 15-минутным свечам (массив в хронологическом
+   * порядке: последний элемент — самая свежая свеча).
+   *
+   * Что исправлено:
+   *  1. **Окно волатильности.** Реализованная вола считалась по ПЕРВЫМ 30 барам
+   *     серии (`for i = 1..30` от начала массива), то есть по самым старым свечам
+   *     из 100. Режим рынка определялся вчерашней волатильностью, а не текущей.
+   *  2. **Пороги волатильности.** 0.08 / 0.02 в годовом выражении недостижимы для
+   *     крипты: типичная 15-минутная σ ≈ 0.3% даёт ~0.18 годовых, поэтому почти
+   *     любой рынок попадал в VOLATILE, а RANGING не возвращался никогда.
+   *     Пороги пересчитаны на реалистичные годовые уровни (см. константы).
+   *  3. **Мёртвая ветка тренда.** `if (ema9 > ema21 && ema21 > ema50) return
+   *     "TRENDING_BULL"; return "TRENDING_BULL";` — обе ветки возвращали одно и то
+   *     же, то есть стек EMA вообще не проверялся: трендом объявлялось любое
+   *     расхождение DI. Теперь несогласованный тренд честно помечается как рваный.
+   *  4. **LOW_VOLATILITY_SQUEEZE** больше не мёртвое значение перечисления:
+   *     сжатие определяется по низкой воле и узкому диапазону относительно ATR.
+   */
   detectRegime(candles: OKXCandle[]): MarketRegime {
     if (candles.length < 20) return "NEUTRAL_CONSOLIDATION";
 
     const { adx, plusDI, minusDI } = this.calculateADX(candles);
     const { ema9, ema21, ema50 } = this.calculateEMAStack(candles);
-
-    // Trend strength regime via ADX(14) + EMA-stack
-    if (adx > 25) {
-      if (plusDI > minusDI) {
-        if (ema9 > ema21 && ema21 > ema50) return "TRENDING_BULL";
-        return "TRENDING_BULL";
-      } else {
-        if (ema9 < ema21 && ema21 < ema50) return "TRENDING_BEAR";
-        return "TRENDING_BEAR";
-      }
-    }
-
-    // Volatility regime via realized vol
     const closes = candles.map((c) => c.close);
-    const recentReturns: number[] = [];
-    for (let i = 1; i < Math.min(30, closes.length); i++) {
-      recentReturns.push(Math.log(closes[i] / closes[i - 1]));
+    const realizedVol = this.annualizedVol(closes, VOL_WINDOW_BARS);
+    const atrPct = this.averageTrueRangePct(candles, ADX_WINDOW);
+
+    // 0. «Замёрзший» рынок. ADX — это ОТНОШЕНИЕ направленного движения к
+    //    истинному диапазону: когда диапазон вырождается (нет сделок, праздник,
+    //    мёртвый альткоин), знаменатель стремится к нулю и ADX превращается в
+    //    шум — на идеально плоском ряде он даёт 100 при +DI = 0, то есть
+    //    «сильный медвежий тренд» на полном отсутствии движения. Раньше такой
+    //    ряд объявлялся TRENDING_BEAR и открывал дорогу трендовым связкам.
+    if (!Number.isFinite(atrPct) || atrPct < FROZEN_ATR_PCT) {
+      const traded = candles.slice(-ADX_WINDOW).some((c) => c.volume > 0);
+      // LIQUIDITY_CRUNCH раньше был недостижимым значением перечисления:
+      // теперь он означает ровно то, что написано — движения и объёма нет.
+      return traded ? "NEUTRAL_CONSOLIDATION" : "LIQUIDITY_CRUNCH";
     }
-    const vol = recentReturns.reduce((a, b) => a + Math.pow(b, 2), 0) / recentReturns.length;
-    const realizedVol = Math.sqrt(vol) * Math.sqrt(365 * 24 * 4);
 
-    if (realizedVol > 0.08) return "VOLATILE";
-    if (realizedVol < 0.02) return "RANGING";
+    // 1. Сила тренда: ADX(14) + стек EMA + реальное смещение цены за окно.
+    if (adx > ADX_TREND_MIN) {
+      const diUp = plusDI > minusDI;
+      const emaUp = ema9 > ema21 && ema21 > ema50;
+      const emaDown = ema9 < ema21 && ema21 < ema50;
+      // Чистое смещение за окно ADX: пила с нулевым итогом трендом не является,
+      // даже если DI и средние случайно выстроились в одну сторону.
+      const disp = this.netDisplacement(closes, ADX_WINDOW);
+      const trendConfirmed =
+        Math.abs(disp) >= TREND_MIN_DISPLACEMENT_PCT && (diUp ? disp > 0 : disp < 0);
 
-    // Choppy market
-    if (adx < 20 && Math.abs(plusDI - minusDI) < 5) {
+      if (trendConfirmed && diUp && emaUp) return "TRENDING_BULL";
+      if (trendConfirmed && !diUp && emaDown) return "TRENDING_BEAR";
+      // DI показывает направление, но структура средних или фактическое
+      // смещение его не подтверждают: движение молодое или рваное. Называть
+      // его трендом — значит давать трендовым связкам зелёный свет на флэте.
+      // Режим в этом случае доопределяется по волатильности ниже: «chop» на
+      // тихом рынке был бы такой же выдумкой, как и «тренд» на пиле.
+    }
+
+    // 2. Волатильность
+    if (realizedVol > VOL_ANNUALIZED_HIGH) return "VOLATILE";
+
+    // 3. Сжатие: вола низкая И диапазон последних баров узкий — классический
+    //    предвестник импульса. Раньше режим не определялся никогда.
+    if (realizedVol < VOL_ANNUALIZED_SQUEEZE && this.isRangeCompressed(candles)) {
+      return "LOW_VOLATILITY_SQUEEZE";
+    }
+
+    if (realizedVol < VOL_ANNUALIZED_LOW) return "RANGING";
+
+    // 4. Пиловка без направления
+    if (adx < ADX_CHOP_MAX && Math.abs(plusDI - minusDI) < DI_GAP_CHOP) {
       return "HIGH_VOLATILITY_CHOP";
     }
 
     return "NEUTRAL_CONSOLIDATION";
+  }
+
+  /**
+   * Годовая реализованная волатильность по последним `window` лог-доходностям
+   * 15-минутных баров. Берётся ХВОСТ ряда — то, что происходит сейчас.
+   */
+  private annualizedVol(closes: number[], window: number): number {
+    if (closes.length < 3) return 0;
+    const from = Math.max(1, closes.length - window);
+    const returns: number[] = [];
+    for (let i = from; i < closes.length; i++) {
+      const prev = closes[i - 1];
+      const cur = closes[i];
+      if (prev > 0 && cur > 0) returns.push(Math.log(cur / prev));
+    }
+    if (returns.length === 0) return 0;
+    const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
+    const variance = returns.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / returns.length;
+    return Math.sqrt(variance) * BARS_PER_YEAR_15M_SQRT;
+  }
+
+  /**
+   * Средний истинный диапазон в долях цены за последние `window` баров.
+   * Мера «живости» рынка: около нуля — котировки стоят, и направленные
+   * индикаторы на них не имеют смысла.
+   */
+  private averageTrueRangePct(candles: OKXCandle[], window: number): number {
+    const tail = candles.slice(-(window + 1));
+    if (tail.length < 2) return 0;
+    let trSum = 0;
+    for (let i = 1; i < tail.length; i++) {
+      const prevClose = tail[i - 1].close;
+      trSum += Math.max(
+        tail[i].high - tail[i].low,
+        Math.abs(tail[i].high - prevClose),
+        Math.abs(tail[i].low - prevClose)
+      );
+    }
+    const avgTr = trSum / (tail.length - 1);
+    const lastClose = tail[tail.length - 1].close;
+    return lastClose > 0 ? avgTr / lastClose : 0;
+  }
+
+  /** Чистое смещение цены за последние `window` баров, в долях (0.01 = 1%). */
+  private netDisplacement(closes: number[], window: number): number {
+    if (closes.length < window + 1) return 0;
+    const from = closes[closes.length - 1 - window];
+    const to = closes[closes.length - 1];
+    return from > 0 ? (to - from) / from : 0;
+  }
+
+  /** Узкий ли диапазон последних баров относительно их среднего истинного диапазона. */
+  private isRangeCompressed(candles: OKXCandle[], window = 10): boolean {
+    const tail = candles.slice(-window);
+    if (tail.length < 3) return false;
+    const high = Math.max(...tail.map((c) => c.high));
+    const low = Math.min(...tail.map((c) => c.low));
+    const mid = (high + low) / 2;
+    if (mid <= 0) return false;
+    const bandWidth = (high - low) / mid;
+    const atr = tail.reduce((acc, c) => acc + (c.high - c.low), 0) / tail.length / mid;
+    // Полоса за 10 баров меньше 2.5 среднего бара — рынок сжат.
+    return atr > 0 && bandWidth < atr * SQUEEZE_BAND_ATR_RATIO;
   }
 
   calculate15Categories(input: FeatureEngineInput): FeatureEngineOutput {
@@ -292,8 +442,11 @@ export class FeatureEngine {
 
     // 5. Order Book Microstructure (IR@2% + Top 20 Depth Asymmetry)
     let bookImbalance = 0;
-    let spreadBps = 1.5;
+    // null = спреда нет, потому что нет стакана. Прежнее значение 1.5 bps
+    // выдавалось за измерение и уходило в метаданные как факт.
+    let spreadBps: number | null = null;
     let ir2pct = 0;
+    const hasBook = Boolean(book && book.bids.length > 0 && book.asks.length > 0);
     if (book && book.bids.length > 0 && book.asks.length > 0) {
       const bidDepth = book.bids.slice(0, 15).reduce((acc, [, sz]) => acc + sz, 0);
       const askDepth = book.asks.slice(0, 15).reduce((acc, [, sz]) => acc + sz, 0);
@@ -318,32 +471,56 @@ export class FeatureEngine {
       rawValue: bookImbalance * 100,
       normalizedScore: bookNorm,
       direction: bookNorm > 0.1 ? "UP" : bookNorm < -0.1 ? "DOWN" : "NEUTRAL",
-      confidence: book ? 0.95 : 0.4,
-      missingness: book ? 0 : 0.6,
+      // Нет стакана — нет и признака: нулевая уверенность и полная пропущенность.
+      // Раньше отсутствующие данные давали уверенность 0.4, которая поднимала
+      // coverageLiquidity связки и её EVS, то есть вознаграждала за пробел.
+      confidence: hasBook ? 0.95 : 0,
+      missingness: hasBook ? 0 : 1,
       supportCount: book ? book.bids.length : 0,
       metadata: { bookImbalance, spreadBps, ir2pct },
     };
 
     // 6. Derivatives Positioning (Funding Rate & Open Interest)
-    // Fixed thresholds: -0.01%/+0.03% per 8h
-    const fundingRateVal = funding?.fundingRate ?? 0.0001;
-    // OKX funding rate baseline: 0.01% per 8h is neutral.
-    // >0.03% is crowded longs (bearish squeeze risk), <-0.01% is crowded shorts (bullish short squeeze)
+    //
+    // Что исправлено:
+    //  a) `funding?.fundingRate ?? 0.0001` подставлял нейтральную ставку OKX
+    //     вместо отсутствующих данных, и формула выдавала из пробела готовый
+    //     сигнал DOWN с уверенностью 0.5.
+    //  b) normalizedScore и direction считались из ДВУХ разных величин с
+    //     ПРОТИВОПОЛОЖНЫМИ знаками: `fundingAdjustedNorm = +funding*2000`
+    //     (моментум) шёл в скор, а `fundingNorm = -funding*4000` (возврат к
+    //     среднему) — в направление. При положительном фандинге получалось
+    //     «скор > 0, direction = DOWN»: движок связок считал согласие
+    //     категорий по direction, а EVS — по score, то есть одно и то же
+    //     свидетельство усиливало связку и одновременно её разворачивало.
+    //  Оставлена одна интерпретация — контртрендовая (переполненная сторона
+    //  платит funding), и скор с направлением теперь выводятся из одного числа.
+    const hasFunding = funding !== undefined && funding !== null;
+    const fundingRateVal = hasFunding ? funding!.fundingRate : 0;
     const annualizedFunding = fundingRateVal * 3 * 365 * 100;
-    // Mean reversion logic: extremely positive funding predicts negative mean reversion; negative funding predicts positive squeeze
-    const fundingNorm = this.clip(-fundingRateVal * 4000);
-    // Apply corrected thresholds (-0.01%/+0.03% range)
-    const fundingAdjustedNorm = this.clip(fundingRateVal * 2000);
+    // Отклонение от базовой ставки OKX (0.01% за 8ч): переполненность стороны
+    // видна именно в отклонении, а не в абсолютном значении.
+    const fundingExcess = hasFunding ? fundingRateVal - FUNDING_NEUTRAL_RATE : 0;
+    const fundingScore = hasFunding ? this.clip(-fundingExcess * FUNDING_SCORE_MULT) : 0;
     results.derivatives_positioning = {
       category: "derivatives_positioning",
       primitiveName: "annualized_funding_pressure",
       rawValue: annualizedFunding,
-      normalizedScore: fundingAdjustedNorm,
-      direction: fundingNorm > 0.2 ? "UP" : fundingNorm < -0.2 ? "DOWN" : "NEUTRAL",
-      confidence: funding ? 0.95 : 0.5,
-      missingness: funding ? 0 : 0.5,
+      normalizedScore: fundingScore,
+      direction: fundingScore > FUNDING_DIR_THRESHOLD ? "UP" : fundingScore < -FUNDING_DIR_THRESHOLD ? "DOWN" : "NEUTRAL",
+      confidence: hasFunding ? 0.95 : 0,
+      missingness: hasFunding ? 0 : 1,
       supportCount: 1,
-      metadata: { fundingRate: fundingRateVal, annualizedFunding, oiVal: oi?.oi },
+      // OI пока остаётся только в метаданных: уровень открытого интереса сам по
+      // себе не сигнал (это размер, а не изменение). См. идею в аудите: нужен
+      // ряд OI по времени, чтобы считать dOI/dt и связку «цена↑ + OI↓».
+      metadata: {
+        fundingRate: fundingRateVal,
+        fundingExcess,
+        annualizedFunding,
+        oiVal: oi && oi.oi > 0 ? oi.oi : null,
+        oiCcy: oi && oi.oiCcy > 0 ? oi.oiCcy : null,
+      },
     };
 
     // 7. Liquidations & Cascades (LGS - Liquidation Gravity Score)
@@ -373,16 +550,19 @@ export class FeatureEngine {
 
     // 8. Cross-Exchange & Cross-Venue Dispersion
     // Spot vs Futures basis proxy:
-    const basisBps = funding ? funding.fundingRate * 10000 : 2.5;
-    const dispNorm = this.clip(Math.tanh(basisBps / 10));
+    // Прежнее `: 2.5` при отсутствии фандинга подставляло выдуманный базис
+    // (+2.5 bps → dispNorm ≈ 0.24 → direction UP) с уверенностью 0.75 и
+    // пропущенностью 0.1: категория выглядела измеренной, не будучи ею.
+    const basisBps = hasFunding ? funding!.fundingRate * 10000 : 0;
+    const dispNorm = hasFunding ? this.clip(Math.tanh(basisBps / 10)) : 0;
     results.cross_exchange_dispersion = {
       category: "cross_exchange_dispersion",
       primitiveName: "spot_swap_basis_dispersion",
       rawValue: basisBps,
       normalizedScore: dispNorm,
       direction: dispNorm > 0.2 ? "UP" : dispNorm < -0.2 ? "DOWN" : "NEUTRAL",
-      confidence: 0.75,
-      missingness: 0.1,
+      confidence: hasFunding ? 0.75 : 0,
+      missingness: hasFunding ? 0.1 : 1,
       supportCount: 1,
       metadata: { basisBps },
     };
@@ -509,7 +689,12 @@ export class FeatureEngine {
 
     // 15. Anomaly & Novelty Detector (Multi-dimensional Z-Score)
     // Compute distance of current vector from standard neutral state
-    const coreScores = [momNorm, rvolNorm, flowNorm, bookNorm, fundingAdjustedNorm];
+    // В ядро аномалии входят только ИЗМЕРЕННЫЕ категории: раньше отсутствующий
+    // стакан и фандинг попадали сюда нулями, но оставались в знаменателе, и
+    // отклонение систематически занижалось именно тогда, когда данных мало.
+    const coreScores: number[] = [momNorm, rvolNorm, flowNorm];
+    if (hasBook) coreScores.push(bookNorm);
+    if (hasFunding) coreScores.push(fundingScore);
     const meanDev = coreScores.reduce((a, b) => a + Math.abs(b), 0) / coreScores.length;
     // High anomaly means unusual confluence across multiple factors
     const anomalyZ = Math.tanh((meanDev - 0.25) * 4);
@@ -519,8 +704,9 @@ export class FeatureEngine {
       rawValue: meanDev,
       normalizedScore: this.clip(anomalyZ),
       direction: anomalyZ > 0.25 ? (momNorm >= 0 ? "UP" : "DOWN") : "NEUTRAL",
-      confidence: 0.88,
-      missingness: 0,
+      // Уверенность пропорциональна числу измеренных ядер из пяти.
+      confidence: 0.88 * (coreScores.length / 5),
+      missingness: 1 - coreScores.length / 5,
       supportCount: len,
       metadata: { meanDev, anomalyZ },
     };
@@ -537,30 +723,42 @@ export class FeatureEngine {
     };
   }
 
+  /**
+   * Качество данных актива, **в шкале 0..10**.
+   *
+   * Единая шкала важна: потребитель (`combination-engine`) считает компонент
+   * EVS как `(dataQualityBase / 10) * (1 - avgMissing) * 10`, а запасные
+   * значения в планировщике и роутах — 7.5 и 9.2, то есть все вокруг считают,
+   * что максимум равен 10. Эта функция возвращала 0..100, поэтому компонент
+   * качества данных всегда упирался в потолок 10 из 10: связка с мёртвыми
+   * котировками получала столько же баллов, сколько связка с полным набором
+   * живых признаков, и EVS переставал наказывать за плохие данные.
+   */
   private calculateDataQualityScore(
     signals: Partial<Record<CategoryKey, NormalizedSignal>>,
     candleCount: number
   ): number {
     let score = 100;
 
-    // Penalize missing signals
-    const filledCount = Object.values(signals).filter((s) => s && s.normalizedScore !== 0).length;
-    const missingPenalty = (CATEGORY_KEYS.length - filledCount) * 2;
-    score -= missingPenalty;
+    // Штраф за незаполненные категории. Нулевой скор — это НЕ признак пропуска
+    // (фандинг ровно на базовой ставке даёт законный ноль), поэтому считаем
+    // пропущенными только категории с полной пропущенностью.
+    const values = Object.values(signals).filter((s): s is NormalizedSignal => Boolean(s));
+    const filledCount = values.filter((s) => s.missingness < 1).length;
+    score -= (CATEGORY_KEYS.length - filledCount) * 2;
 
-    // Penalize low candle count
+    // Штраф за короткую историю
     if (candleCount < 10) score -= 15;
     if (candleCount < 5) score -= 20;
 
-    // Penalize extreme missingness
-    const keys = Object.keys(signals);
-    const avgMissing =
-      keys.length > 0
-        ? (Object.values(signals).reduce((acc, s) => acc + (s ? s.missingness : 1), 0) / keys.length)
-        : 1;
+    // Штраф за среднюю пропущенность
+    const avgMissing = values.length > 0
+      ? values.reduce((acc, s) => acc + s.missingness, 0) / values.length
+      : 1;
     score -= avgMissing * 30;
 
-    return Math.max(0, Math.min(100, score));
+    // Приведение к шкале 0..10 — той самой, которую ждут потребители.
+    return Math.max(0, Math.min(100, score)) / 10;
   }
 }
 

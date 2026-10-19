@@ -10,14 +10,17 @@ export interface StatusStats {
   hits: number;
   misses: number;
   ambiguous: number;
-  empiricalHitRate: number;
-  averageBrierScore: number;
+  /** null — решённых исходов ещё нет: выдуманного «50%» больше не будет. */
+  empiricalHitRate: number | null;
+  /** null — веса ещё не пересчитывались на реальных исходах. */
+  averageBrierScore: number | null;
 }
 
 export interface SchedulerInfo {
   lastRunTime: string | null;
   nextRunTime: string | null;
-  secondsToNextRun: number;
+  /** null — процесс ещё не сделал ни одной попытки цикла. */
+  secondsToNextRun: number | null;
   intervalMinutes: number;
 }
 
@@ -68,7 +71,13 @@ export interface StatusResponse {
   latestLatencyMs?: number | null;
   latestRegime?: string | null;
   dataQuality?: string | null;
-  autopilot?: { enabled: boolean; cyclesCompleted: number; retrainsCompleted: number };
+  autopilot?: {
+    enabled: boolean;
+    cyclesCompleted: number;
+    cyclesFailed: number;
+    lastCycleAt?: string | null;
+    lastError?: string | null;
+  };
   universe?: UniverseMemberRow[];
   universeSize?: number;
   universeSource?: UniverseSource;
@@ -206,7 +215,12 @@ export interface LedgerResponse {
   error?: string;
   hypotheses: HypothesisRow[];
   forecasts: ForecastRow[];
+  /** Всего записей в журнале, а не размер страницы. */
   totalCount: number;
+  /** Сколько записей вернул запрос. */
+  pageSize?: number;
+  /** Сколько осталось за пределами страницы. */
+  hiddenCount?: number;
 }
 
 export interface WeightRow {
@@ -231,7 +245,8 @@ export interface LearningResponse {
   errorDistribution: Record<string, number>;
   calibrationBins: { bin: string; predictedProb: number; actualHitRate: number; count: number }[];
   totalAccumulatedSamples: number;
-  averageBrierScore: string;
+  /** null — исходов ещё не было; строка "0.2500" вместо данных больше не показывается. */
+  averageBrierScore: string | null;
 }
 
 export interface WalkForwardMetrics {
@@ -365,9 +380,11 @@ export interface EdgeResponse {
 
 export interface CycleApiResult {
   timestamp: string;
-  isLiveOKX: boolean;
+  isLiveOKX: boolean | null;
   latencyMs: number;
-  marketRegime: string;
+  marketRegime: string | null;
+  /** Заполнено, если цикл не выполнялся (например, уже шёл параллельный). */
+  skipped?: string;
   combinationsGenerated: number;
   hypothesesCreated: number;
   forecastsResolved: number;
@@ -535,8 +552,11 @@ export interface AiSettingsResponse {
 export interface AutopilotInfo {
   enabled: boolean;
   cyclesCompleted: number;
-  retrainsCompleted: number;
+  /** Сколько циклов упало: раньше вместо этого показывали несуществующие «переобучения». */
+  cyclesFailed: number;
   lastCycleAt?: string | null;
+  lastCycleSummary?: string | null;
   lastError?: string | null;
-  nextCycleEtaSec?: number;
+  nextCycleEtaSec?: number | null;
+  intervalMin?: number;
 }

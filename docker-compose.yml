@@ -1,0 +1,62 @@
+# ============================================================================
+#  Локальный стенд автономной лаборатории.
+#
+#  Быстрый старт (только база + dev-сервер на хосте):
+#     docker compose up -d db
+#     npm run db:push        # применить схему и индексы
+#     npm run dev
+#
+#  Полностью в контейнерах (app под profile, чтобы не поднять два автопилота):
+#     docker compose --profile app up --build
+#     docker compose run --rm app npx drizzle-kit push   # один раз
+#
+#  Остановить и удалить данные:
+#     docker compose down -v
+# ============================================================================
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: quant-lab-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: crypto_dev
+    ports:
+      # Порт открыт наружу только для локальной разработки.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d crypto_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: quant-lab-app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/crypto_dev
+      # Серверное расписание: цикл каждые 15 минут, стартует из instrumentation.ts.
+      AUTOPILOT: "1"
+      # Ключи модели пробрасываются из окружения хоста, если они там есть.
+      NVIDIA_API_KEY: ${NVIDIA_API_KEY:-}
+      OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
+    ports:
+      - "3000:3000"
+    profiles:
+      # app поднимается только явно: `docker compose --profile app up --build`.
+      # Это защищает от случайного запуска двух автопилотов (хост + контейнер),
+      # которые начали бы писать в один журнал параллельно.
+      - app
+
+volumes:
+  db-data:
