@@ -1,0 +1,90 @@
+{
+  "project": "ai-crypto-trading",
+  "branch": "arena/282dd940-ai-crypto-trading",
+  "as_of": "2026-10-19",
+  "iteration": 1,
+  "mode": "research-only; application code unchanged",
+  "counts": {
+    "evidence_records": 266,
+    "evidence_by_tier": {
+      "A": 152,
+      "B": 91,
+      "C": 23
+    },
+    "evidence_by_group": {
+      "G00": 8,
+      "G01": 13,
+      "G02": 10,
+      "G03": 11,
+      "G04": 13,
+      "G05": 15,
+      "G06": 14,
+      "G07": 24,
+      "G08": 12,
+      "G09": 24,
+      "G10": 10,
+      "G11": 25,
+      "G12": 15,
+      "G13": 18,
+      "G14": 13,
+      "G15": 15,
+      "G16": 10,
+      "G17": 5,
+      "G18": 11
+    },
+    "claims": 36,
+    "claims_by_status": {
+      "supported": 27,
+      "contested": 6,
+      "insufficient": 3
+    },
+    "rejected": 20,
+    "hypotheses": 12,
+    "audit_findings": 36,
+    "signals_in_findings": 12
+  },
+  "deliverables": {
+    "audit": "audit.md",
+    "findings": "findings.md",
+    "architecture": "architecture.md",
+    "roadmap": "roadmap.md",
+    "hypotheses": "hypotheses.jsonl (schema-valid)",
+    "evidence": "evidence.tsv",
+    "claims": "claims.tsv",
+    "rejected": "rejected.tsv"
+  },
+  "code_defects_confirmed": [
+    "outcome resolution uses latest ticker and a candle window starting before fixedAt",
+    "fixed 0.45% target and 35 bps bar for every asset",
+    "RANGE return is 0.3-movePct and has no executable meaning",
+    "no capital, position, order or equity ledger",
+    "flat 24 bps cost model independent of venue and order type",
+    "EVS sub-scores are length/regime/anomaly proxies, not expected value",
+    "lookback parameter is never used in combination evaluation",
+    "15 feature categories have effective dimension about 4",
+    "funding direction and normalizedScore have opposite signs",
+    "conviction clamped to [0.4,0.9]",
+    "planner prompt contains no prices, volatility, spread or funding",
+    "learning loop re-applies all resolved forecasts each cycle (double counting)",
+    "out-of-universe forecasts resolve at entry price",
+    "signal_features and oi_snapshots are write-only",
+    "session_calendar has hard-coded directional priors"
+  ],
+  "next_action": "Implement roadmap G0.1-G0.5 (resolution price/window, volatility-scaled barriers, instrument-dependent costs, raw conviction, funding sign). No model work before that.",
+  "open_questions": [
+    "Does k*sigma barrier plus meta-labeling beat fixed 35/45 bps on the same candles?",
+    "Is LLM conviction calibrated on 15-minute outcomes at all (ECE)?",
+    "Does a raw-market-state prompt beat the EVS scoreboard A/B?",
+    "What is the real fill rate of maker orders on OKX versus naive replay?",
+    "Does the ensemble of 5-7 models beat the best single model after costs?"
+  ],
+  "blockers": [
+    "no DATABASE_URL, so no replay or backtest was possible in this pass",
+    "sandbox egress blocks okx.com and arxiv.org; OKX endpoints documented but not live-tested",
+    "no historical liquidation, funding-history or L2 data in the repository"
+  ],
+  "source_queue": {
+    "tier_C_to_verify": 23,
+    "note": "C-tier entries are listed for completeness and excluded from conclusions"
+  }
+}
