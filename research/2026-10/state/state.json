@@ -1,0 +1,157 @@
+{
+  "iteration": 1,
+  "sources_total": 353,
+  "sources_unique": 317,
+  "sources_by_tier": {
+    "primary_result": 213,
+    "independent_replication": 10,
+    "official_docs": 5,
+    "secondary_analysis": 88,
+    "vendor_claim": 10,
+    "repo_or_dataset": 27
+  },
+  "sources_by_group": {
+    "tooling": 17,
+    "methodology": 15,
+    "regime": 15,
+    "llm_calibration": 14,
+    "llm": 12,
+    "off_policy": 11,
+    "risk": 11,
+    "ai_safety": 11,
+    "microstructure": 10,
+    "data_quality": 10,
+    "carry": 10,
+    "execution": 10,
+    "options": 10,
+    "tsfm": 9,
+    "derivatives": 8,
+    "liquidations": 8,
+    "bandit": 8,
+    "sentiment": 8,
+    "forecasting": 8,
+    "validation": 8,
+    "uncertainty": 7,
+    "seasonality": 7,
+    "onchain": 6,
+    "data_vendor": 6,
+    "factors": 5,
+    "exchange_docs": 5,
+    "alpha_mining": 5,
+    "exchange_risk": 5,
+    "llm_agent": 5,
+    "token_unlock": 5,
+    "etf_flows": 5,
+    "events": 4,
+    "calibration": 4,
+    "prediction_markets": 4,
+    "efficiency": 4,
+    "volatility": 4,
+    "offline_rl": 4,
+    "engineering": 4,
+    "drl": 4,
+    "listing": 4,
+    "funding": 4,
+    "attention": 4,
+    "intraday_momentum": 4,
+    "rl": 3,
+    "alpha_decay": 3,
+    "statistics": 3,
+    "labeling": 3,
+    "cross_section": 3,
+    "reversal": 3,
+    "costs": 3,
+    "open_interest": 3,
+    "ai_research": 2,
+    "stablecoins": 2,
+    "mev": 2,
+    "manipulation": 1
+  },
+  "hypotheses": [
+    {
+      "id": "H001",
+      "version": 1,
+      "lifecycle": "карточка"
+    },
+    {
+      "id": "H002",
+      "version": 1,
+      "lifecycle": "карточка"
+    },
+    {
+      "id": "H003",
+      "version": 1,
+      "lifecycle": "карточка"
+    },
+    {
+      "id": "H004",
+      "version": 1,
+      "lifecycle": "карточка"
+    },
+    {
+      "id": "H005",
+      "version": 1,
+      "lifecycle": "карточка"
+    },
+    {
+      "id": "H006",
+      "version": 1,
+      "lifecycle": "карточка"
+    },
+    {
+      "id": "H007",
+      "version": 1,
+      "lifecycle": "карточка"
+    },
+    {
+      "id": "H008",
+      "version": 1,
+      "lifecycle": "карточка"
+    },
+    {
+      "id": "H009",
+      "version": 1,
+      "lifecycle": "карточка"
+    },
+    {
+      "id": "H010",
+      "version": 1,
+      "lifecycle": "карточка"
+    },
+    {
+      "id": "H011",
+      "version": 1,
+      "lifecycle": "карточка"
+    },
+    {
+      "id": "H012",
+      "version": 1,
+      "lifecycle": "карточка"
+    },
+    {
+      "id": "H013",
+      "version": 1,
+      "lifecycle": "карточка"
+    },
+    {
+      "id": "H014",
+      "version": 1,
+      "lifecycle": "карточка"
+    }
+  ],
+  "candidates_passed": 14,
+  "candidates_rejected": 10,
+  "contradictions_open": 5,
+  "holdout_status": "не_создан (по протоколу — итерация 2)",
+  "open_questions": [
+    "Устойчив ли turn-of-candle после 2023 на BTC и альтах?",
+    "Сколько предсказательной силы boundary OFI остаётся после HFT-арбитража?",
+    "Эндогенны ли ETF-потоки настолько, что сигнал исчезает?",
+    "Работает ли intraday momentum, если «день» определяется по объёму, а не по UTC?",
+    "Даёт ли OI/cap снижение просадки вне эпизода 10/10/2025?",
+    "Как дедуплицировать stablecoin mint/burn от технических переводов?"
+  ],
+  "queue_unavailable": [],
+  "next_action": "собрать фриз «паспорт измерения»: bracket-симулятор, журнал попыток, модель издержек по активу; затем прогнать T003/T005/T006 на существующих барах",
+  "last_updated": "2026-10-18"
+}
