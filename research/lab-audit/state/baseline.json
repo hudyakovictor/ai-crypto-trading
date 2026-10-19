@@ -1,0 +1,30 @@
+{
+  "status": "not_measured",
+  "why": "В песочнице нет DATABASE_URL и доступа к OKX, поэтому базовую линию снять нельзя. Шаблон фиксирует поля, чтобы после подключения БД они были заполнены один раз и не пересчитывались задним числом.",
+  "as_of": null,
+  "window_days": 7,
+  "source": "forecasts + hypotheses + combinations + learning_weights",
+  "metrics": {
+    "cycles_total": null,
+    "cycles_with_error": null,
+    "cycles_with_zero_picks": null,
+    "wait_equivalent_share": null,
+    "hypotheses_total": null,
+    "forecasts_resolved": null,
+    "resolution_lag_sec_p50": null,
+    "resolution_lag_sec_p95": null,
+    "hit_rate": null,
+    "net_return_per_decision_bps": null,
+    "avg_evs_selected": null,
+    "avg_evs_rejected": null,
+    "unique_expressions_per_week": null,
+    "conviction_mean": null,
+    "conviction_std": null,
+    "ece": null,
+    "brier": null,
+    "weights_dispersion_between_cycles": null,
+    "provider_failure_rate": null,
+    "cycle_duration_p95_sec": null
+  },
+  "instructions": "Заполнить одним запросом за фиксированное окно; сохранить дату и config_version. Любое последующее изменение конфигурации сравнивается только с этим снимком."
+}

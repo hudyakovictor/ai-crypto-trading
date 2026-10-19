@@ -2,13 +2,14 @@
   "project": "ai-crypto-trading",
   "branch": "arena/282dd940-ai-crypto-trading",
   "as_of": "2026-10-19",
-  "iteration": 1,
+  "iteration": 2,
   "mode": "research-only; application code unchanged",
+  "focus": "laboratory configuration: knobs, limits, thresholds, learning cadence, prompts, authority",
   "counts": {
-    "evidence_records": 266,
+    "evidence_records": 309,
     "evidence_by_tier": {
-      "A": 152,
-      "B": 91,
+      "A": 180,
+      "B": 106,
       "C": 23
     },
     "evidence_by_group": {
@@ -30,61 +31,76 @@
       "G15": 15,
       "G16": 10,
       "G17": 5,
-      "G18": 11
+      "G18": 11,
+      "G19": 15,
+      "G20": 15,
+      "G21": 8,
+      "G22": 5
     },
-    "claims": 36,
+    "claims": 46,
     "claims_by_status": {
-      "supported": 27,
+      "supported": 37,
       "contested": 6,
       "insufficient": 3
     },
     "rejected": 20,
     "hypotheses": 12,
+    "config_knobs": 44,
+    "knobs_needing_change": 34,
+    "experiments_pre_registered": 12,
     "audit_findings": 36,
-    "signals_in_findings": 12
+    "config_signals": 12,
+    "market_signals": 12
   },
-  "deliverables": {
-    "audit": "audit.md",
-    "findings": "findings.md",
-    "architecture": "architecture.md",
-    "roadmap": "roadmap.md",
-    "hypotheses": "hypotheses.jsonl (schema-valid)",
-    "evidence": "evidence.tsv",
-    "claims": "claims.tsv",
-    "rejected": "rejected.tsv"
+  "config_snapshot": {
+    "cycles_per_day": 102.9,
+    "assets": 10,
+    "combinations_per_asset": 100,
+    "candidate_shortlist": 20,
+    "policy_ceiling": 12,
+    "hypotheses_per_day_max": 1234,
+    "share_of_evaluations_ever_tested": 0.012,
+    "cost_round_trip_bps": 24,
+    "outcome_bar_bps": 35,
+    "conviction_clamp": [
+      0.4,
+      0.9
+    ],
+    "temperature": 0.2,
+    "thresholds_evs": [
+      30,
+      40,
+      58,
+      75
+    ],
+    "limits": [
+      12,
+      40,
+      5,
+      2
+    ]
   },
-  "code_defects_confirmed": [
-    "outcome resolution uses latest ticker and a candle window starting before fixedAt",
-    "fixed 0.45% target and 35 bps bar for every asset",
-    "RANGE return is 0.3-movePct and has no executable meaning",
-    "no capital, position, order or equity ledger",
-    "flat 24 bps cost model independent of venue and order type",
-    "EVS sub-scores are length/regime/anomaly proxies, not expected value",
-    "lookback parameter is never used in combination evaluation",
-    "15 feature categories have effective dimension about 4",
-    "funding direction and normalizedScore have opposite signs",
-    "conviction clamped to [0.4,0.9]",
-    "planner prompt contains no prices, volatility, spread or funding",
-    "learning loop re-applies all resolved forecasts each cycle (double counting)",
-    "out-of-universe forecasts resolve at entry price",
-    "signal_features and oi_snapshots are write-only",
-    "session_calendar has hard-coded directional priors"
-  ],
-  "next_action": "Implement roadmap G0.1-G0.5 (resolution price/window, volatility-scaled barriers, instrument-dependent costs, raw conviction, funding sign). No model work before that.",
+  "viability_check": {
+    "question": "Может ли 15-минутная стратегия на OKX spot taker быть прибыльной при текущей конфигурации?",
+    "answer": "Нет. Круг издержек 20-24 bps при медианном ходе 15-минутного бара 15-20 bps.",
+    "implication": "T1 обязан привести к росту доли wait; TE002 должен сравнить 4 часа и perp maker."
+  },
+  "next_action": "T0.1-T0.2: внести config/lab.config.json как реестр и писать config_version в каждый прогноз. Затем T1.1-T1.2: цена/окно разрешения и ритм по границе свечи.",
   "open_questions": [
-    "Does k*sigma barrier plus meta-labeling beat fixed 35/45 bps on the same candles?",
-    "Is LLM conviction calibrated on 15-minute outcomes at all (ECE)?",
-    "Does a raw-market-state prompt beat the EVS scoreboard A/B?",
-    "What is the real fill rate of maker orders on OKX versus naive replay?",
-    "Does the ensemble of 5-7 models beat the best single model after costs?"
+    "Сколько циклов сейчас дают ноль гипотез и сколько wait-эквивалентов?",
+    "Какая доля прогнозов разрешается с лагом больше 20 минут?",
+    "Калибруется ли conviction модели на 15-минутных исходах (ECE)?",
+    "Сколько уникальных выражений реально проверяется за неделю?",
+    "Какой процент отобранных стратегий выживает при баре max(k·sigma, 3·costs)?"
   ],
   "blockers": [
-    "no DATABASE_URL, so no replay or backtest was possible in this pass",
-    "sandbox egress blocks okx.com and arxiv.org; OKX endpoints documented but not live-tested",
-    "no historical liquidation, funding-history or L2 data in the repository"
+    "нет DATABASE_URL — базовая линия и replay не сняты",
+    "нет config_version в прогнозах — сравнение периодов невозможно",
+    "sandbox блокирует okx.com и arxiv.org"
   ],
-  "source_queue": {
-    "tier_C_to_verify": 23,
-    "note": "C-tier entries are listed for completeness and excluded from conclusions"
+  "authority_model": {
+    "P0": "система меняет сама",
+    "P1": "система предлагает, человек применяет",
+    "P2": "только человек"
   }
 }
